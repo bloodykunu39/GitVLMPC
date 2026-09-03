@@ -7,7 +7,8 @@ import winreg
 
 VIDEO_DIR = None
 DATA_FILE = None
-MPC_PORT = 13579
+DEFAULT_MPC_PORT = 13579
+MPC_PORT = DEFAULT_MPC_PORT
 EXTS = {".mp4",".mkv",".avi",".webm",".mov",".m4v",".ts",".m2ts",".flv",".wmv",".mpg",".mpeg"}
 
 def fmt(s):
@@ -82,12 +83,20 @@ def registry_history():
 class App:
     def __init__(self,root):
         self.root=root; self.root.title("MPC-BE Lecture Progress"); self.root.geometry("1120x720")
-        self.data=load(); self.build(); self.refresh(); root.after(1000,self.loop)
+        self.folder_var=tk.StringVar(value=str(VIDEO_DIR))
+        self.search_var=tk.StringVar()
+        self.data=load(); self.load_settings(); self.build(); self.refresh(); root.after(1000,self.loop)
+        root.after(10000,self.auto_refresh)
 
     def build(self):
         f=ttk.Frame(self.root,padding=14); f.pack(fill="x")
         ttk.Label(f,text="CMP2 Lecture Progress",font=("Segoe UI",21,"bold")).pack(anchor="w")
-        ttk.Label(f,text=str(VIDEO_DIR),foreground="#666").pack(anchor="w")
+        ttk.Label(f,textvariable=self.folder_var,foreground="#666").pack(anchor="w")
+        search=ttk.Frame(f); search.pack(fill="x",pady=(8,0))
+        ttk.Label(search,text="Search:").pack(side="left")
+        ttk.Entry(search,textvariable=self.search_var,width=42).pack(side="left",padx=7)
+        ttk.Button(search,text="Change Folder",command=self.change_folder).pack(side="left")
+        self.search_var.trace_add("write",lambda *_: self.draw())
         s=ttk.Frame(f); s.pack(fill="x",pady=10)
         self.vars=[tk.StringVar() for _ in range(4)]
         for v in self.vars: ttk.Label(s,textvariable=v,font=("Segoe UI",11)).pack(side="left",padx=(0,25))
@@ -108,14 +117,21 @@ class App:
         sc=ttk.Scrollbar(body,command=self.tree.yview); sc.pack(side="right",fill="y"); self.tree.configure(yscrollcommand=sc.set)
         self.tree.bind("<Button-3>",self.menu)
         self.tree.bind("<Button-1>",self.tree_click)
+        self.tree.bind("<Double-1>",self.open_lecture)
         b=ttk.Frame(self.root,padding=(14,0,14,14)); b.pack(fill="x")
         ttk.Button(b,text="Refresh",command=self.refresh).pack(side="left")
         ttk.Button(b,text="Import MPC-BE History",command=self.import_history).pack(side="left",padx=7)
         ttk.Button(b,text="Open Folder",command=lambda:os.startfile(str(VIDEO_DIR))).pack(side="left")
         ttk.Button(b,text="Restore Removed",command=self.restore_removed).pack(side="left",padx=7)
+        ttk.Button(b,text="MPC Settings",command=self.configure_mpc).pack(side="left",padx=7)
+        ttk.Button(b,text="Test MPC",command=self.test_mpc).pack(side="left")
+        ttk.Button(b,text="Export Progress",command=self.export_progress).pack(side="left",padx=7)
+        ttk.Button(b,text="Import Progress",command=self.import_progress).pack(side="left")
         self.select_all_button=ttk.Button(b,text="Select all",command=self.select_all)
         self.unselect_all_button=ttk.Button(b,text="Unselect all",command=self.unselect_all)
         self.done_selecting_button=ttk.Button(b,text="Done",command=self.exit_select_mode)
+        self.selected_count=tk.StringVar(value="")
+        self.selected_count_label=ttk.Label(b,textvariable=self.selected_count,foreground="#666")
         self.conn=tk.StringVar(); ttk.Label(b,textvariable=self.conn,foreground="#666").pack(side="right")
 
     def refresh(self):
@@ -126,11 +142,56 @@ class App:
                 if d:r["duration"]=d
         save(self.data); self.draw()
 
+    def visible_vids(self):
+        query=self.search_var.get().strip().lower()
+        return [p for p in vids() if not query or query in p.name.lower()]
+
+    def auto_refresh(self):
+        self.refresh()
+        self.root.after(10000,self.auto_refresh)
+
+    def change_folder(self):
+        global VIDEO_DIR, DATA_FILE
+        selected=filedialog.askdirectory(parent=self.root,initialdir=str(VIDEO_DIR),title="Choose your lecture video folder")
+        if not selected:return
+        self.exit_select_mode()
+        VIDEO_DIR=Path(selected); DATA_FILE=VIDEO_DIR / ".lecture_progress.json"
+        self.folder_var.set(str(VIDEO_DIR)); self.data=load(); self.load_settings(); self.refresh()
+
+    def load_settings(self):
+        global MPC_PORT
+        MPC_PORT=DEFAULT_MPC_PORT
+        try:
+            port=int(self.data.get("_settings",{}).get("mpc_port",DEFAULT_MPC_PORT))
+            if 1<=port<=65535:MPC_PORT=port
+        except (TypeError,ValueError): pass
+
+    def configure_mpc(self):
+        global MPC_PORT
+        value=simpledialog.askstring("MPC-BE settings","MPC-BE web interface port:",initialvalue=str(MPC_PORT),parent=self.root)
+        if value is None:return
+        try:
+            port=int(value)
+            if not 1<=port<=65535:raise ValueError
+        except ValueError:
+            messagebox.showerror("Invalid port","Enter a port number from 1 to 65535.")
+            return
+        MPC_PORT=port
+        self.data.setdefault("_settings",{})["mpc_port"]=port
+        save(self.data); self.conn.set(f"MPC-BE port changed to {MPC_PORT}; testing..."); self.test_mpc()
+
+    def test_mpc(self):
+        info=mpc()
+        if info:
+            messagebox.showinfo("MPC-BE connection",f"Connected to MPC-BE on port {MPC_PORT}.")
+        else:
+            messagebox.showwarning("MPC-BE connection",f"Could not connect on port {MPC_PORT}. Check MPC-BE's web interface settings.")
+
     def draw(self):
         self.tree.delete(*self.tree.get_children()); total=covered=0
         rows=[]
         hidden=set(self.data.get("_hidden", []))
-        for p in vids():
+        for p in self.visible_vids():
             key=str(p.resolve())
             if key in hidden: continue
             r=self.data[key]; d=float(r.get("duration") or 0); f=float(r.get("furthest") or 0)
@@ -152,6 +213,7 @@ class App:
         pct=covered/total*100 if total else 0
         self.vars[0].set("Total: "+big(total)); self.vars[1].set("Covered: "+big(covered))
         self.vars[2].set("Remaining: "+big(max(0,total-covered))); self.vars[3].set(f"Overall: {pct:.1f}%"); self.pb["value"]=pct
+        self.selected_count.set(f"{len(self.checked)} selected" if self.select_mode else "")
 
     def sort_tree(self,column):
         if column=="select": return
@@ -169,6 +231,10 @@ class App:
         else: self.checked.add(iid)
         self.draw()
         return "break"
+
+    def open_lecture(self,e):
+        iid=self.tree.identify_row(e.y)
+        if iid: os.startfile(iid)
 
     def selected(self):
         s=self.tree.selection()
@@ -204,6 +270,7 @@ class App:
         self.select_all_button.pack(side="left",padx=7)
         self.unselect_all_button.pack(side="left",padx=7)
         self.done_selecting_button.pack(side="left",padx=7)
+        self.selected_count_label.pack(side="left",padx=7)
         self.draw()
 
     def toggle_select(self,p):
@@ -215,7 +282,7 @@ class App:
             self.enable_select(p)
 
     def select_all(self):
-        self.checked={str(p.resolve()) for p in vids() if str(p.resolve()) not in set(self.data.get("_hidden", []))}
+        self.checked={str(p.resolve()) for p in self.visible_vids() if str(p.resolve()) not in set(self.data.get("_hidden", []))}
         self.draw()
 
     def unselect_all(self):
@@ -305,8 +372,54 @@ class App:
         self.select_mode=False; self.checked.clear()
         for button in (self.select_all_button,self.unselect_all_button,self.done_selecting_button):
             button.pack_forget()
+        self.selected_count_label.pack_forget()
         self.tree.column("select",width=0,stretch=False)
         self.draw()
+
+    def export_progress(self):
+        target=filedialog.asksaveasfilename(
+            parent=self.root,title="Export lecture progress",defaultextension=".json",
+            filetypes=[("JSON files","*.json"),("All files","*.*")],initialfile="lecture_progress.json"
+        )
+        if not target:return
+        progress={}
+        for p in vids():
+            key=str(p.resolve())
+            if key in self.data:progress[p.name]=self.data[key]
+        payload={"progress":progress,"hidden":[Path(key).name for key in self.data.get("_hidden", [])],
+                 "settings":self.data.get("_settings",{})}
+        try:
+            Path(target).write_text(json.dumps(payload,indent=2,ensure_ascii=False),encoding="utf-8")
+            messagebox.showinfo("Export complete",f"Exported progress for {len(progress)} lecture(s).")
+        except OSError as error:
+            messagebox.showerror("Export failed",str(error))
+
+    def import_progress(self):
+        source=filedialog.askopenfilename(
+            parent=self.root,title="Import lecture progress",
+            filetypes=[("JSON files","*.json"),("All files","*.*")]
+        )
+        if not source:return
+        try:
+            imported=json.loads(Path(source).read_text(encoding="utf-8"))
+            if not isinstance(imported,dict):raise ValueError("The file must contain a JSON object.")
+        except (OSError,ValueError,json.JSONDecodeError) as error:
+            messagebox.showerror("Import failed",str(error)); return
+        progress=imported.get("progress",imported)
+        current={p.name.lower():str(p.resolve()) for p in vids()}
+        count=0
+        for name,record in progress.items():
+            key=current.get(str(name).lower())
+            if key and isinstance(record,dict):self.data[key]=record; count+=1
+        hidden_names={str(name).lower() for name in imported.get("hidden",[]) if isinstance(name,str)}
+        hidden=self.data.setdefault("_hidden",[])
+        for name,key in current.items():
+            if name in hidden_names and key not in hidden:hidden.append(key)
+        if isinstance(imported.get("settings"),dict):
+            self.data["_settings"]=imported["settings"]
+            self.load_settings()
+        save(self.data); self.refresh()
+        messagebox.showinfo("Import complete",f"Imported progress for {count} matching lecture(s).")
 
     def watched(self,p=None):
         p=p or self.selected()

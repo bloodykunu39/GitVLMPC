@@ -21,7 +21,7 @@ Python packages are not required. The app uses only the Python standard library.
    python main.py
    ```
 
-4. Choose the folder containing your lecture videos when prompted.
+4. Choose the folder containing your lecture videos when prompted. You can change it later with **Change Folder**.
 
 The app supports common video formats including MP4, MKV, AVI, WebM, MOV, M4V, TS, M2TS, FLV, WMV, MPG, and MPEG.
 
@@ -34,9 +34,15 @@ Checkbox selections are temporary and are cleared when selection mode is closed 
 - Reads the currently playing file and position from MPC-BE.
 - Tracks the furthest position reached for each lecture.
 - Shows total, covered, remaining, and overall progress.
+- Searches lectures by filename.
+- Refreshes the folder automatically every 10 seconds.
+- Opens a lecture in the Windows default video player when double-clicked.
+- Exports and imports progress using portable JSON files.
+- Allows the MPC-BE web interface port to be changed and tested.
 - Sorts the lecture table by clicking any column heading; click again to reverse the order.
 - Enables checkbox selection from a lecture's right-click menu and supports selecting all visible lectures.
-- Provides right-click actions to mark lectures watched or unwatched, remove them from the tracker, or exit selection mode.
+- Provides selection controls for selecting all, unselecting all, viewing the selected count, and exiting selection mode.
+- Provides right-click actions to mark lectures watched or unwatched, set covered time, use the current MPC-BE position, or remove them from the tracker.
 - In selection mode, applies watched status, covered time, and current MPC-BE position actions to all checked lectures.
 - Allows lectures to be marked watched or unwatched manually.
 - Allows lectures to be removed from the tracker without deleting the video file.
