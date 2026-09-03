@@ -98,7 +98,7 @@ class App:
         ttk.Button(search,text="Change Folder",command=self.change_folder).pack(side="left")
         self.search_var.trace_add("write",lambda *_: self.draw())
         s=ttk.Frame(f); s.pack(fill="x",pady=10)
-        self.vars=[tk.StringVar() for _ in range(4)]
+        self.vars=[tk.StringVar() for _ in range(5)]
         for v in self.vars: ttk.Label(s,textvariable=v,font=("Segoe UI",11)).pack(side="left",padx=(0,25))
         self.pb=ttk.Progressbar(f,maximum=100); self.pb.pack(fill="x")
         n=ttk.LabelFrame(self.root,text="Currently Playing",padding=10); n.pack(fill="x",padx=14,pady=10)
@@ -107,18 +107,29 @@ class App:
         self.npb=ttk.Progressbar(n,maximum=100); ttk.Label(n,textvariable=self.now,font=("Segoe UI",11,"bold")).pack(anchor="w")
         self.npb.pack(fill="x",pady=5); ttk.Label(n,textvariable=self.nd).pack(anchor="w")
         body=ttk.Frame(self.root,padding=(14,0,14,10)); body.pack(fill="both",expand=True)
-        cols=("select","lecture","status","covered","duration","progress"); self.tree=ttk.Treeview(body,columns=cols,show="headings")
+        cols=("select","lecture","status","covered","duration","progress","rating","review"); self.tree=ttk.Treeview(body,columns=cols,show="headings")
         self.sort_column="lecture"; self.sort_reverse=False
         self.select_mode=False; self.checked=set()
-        for c,t,w in zip(cols,("Select","Lecture","Status","Covered","Duration","Progress"),(0,550,120,130,130,100)):
+        for c,t,w in zip(cols,("Select","Lecture","Status","Covered","Duration","Progress","Rating","Review"),(0,420,120,110,110,90,75,280)):
             self.tree.heading(c,text=t,command=lambda column=c: self.sort_tree(column))
             self.tree.column(c,width=w,anchor="w" if c=="lecture" else "center",stretch=c!="select")
         self.tree.pack(side="left",fill="both",expand=True)
+        self.tree.tag_configure("watched",background="#e8f5e9")
+        self.tree.tag_configure("progress",background="#fff8e1")
+        self.tree.tag_configure("unwatched",background="#ffebee")
         sc=ttk.Scrollbar(body,command=self.tree.yview); sc.pack(side="right",fill="y"); self.tree.configure(yscrollcommand=sc.set)
         self.tree.bind("<Button-3>",self.menu)
         self.tree.bind("<Button-1>",self.tree_click)
         self.tree.bind("<Double-1>",self.open_lecture)
-        b=ttk.Frame(self.root,padding=(14,0,14,14)); b.pack(fill="x")
+        toolbar=ttk.Frame(self.root,padding=(14,0,14,0)); toolbar.pack(fill="x")
+        toolbar_canvas=tk.Canvas(toolbar,height=36,highlightthickness=0)
+        toolbar_scroll=ttk.Scrollbar(toolbar,orient="horizontal",command=toolbar_canvas.xview)
+        toolbar_canvas.configure(xscrollcommand=toolbar_scroll.set)
+        toolbar_canvas.pack(fill="x")
+        toolbar_scroll.pack(fill="x")
+        b=ttk.Frame(toolbar_canvas)
+        toolbar_canvas.create_window((0,0),window=b,anchor="nw")
+        b.bind("<Configure>",lambda e: toolbar_canvas.configure(scrollregion=toolbar_canvas.bbox("all")))
         ttk.Button(b,text="Refresh",command=self.refresh).pack(side="left")
         ttk.Button(b,text="Import MPC-BE History",command=self.import_history).pack(side="left",padx=7)
         ttk.Button(b,text="Open Folder",command=lambda:os.startfile(str(VIDEO_DIR))).pack(side="left")
@@ -132,11 +143,12 @@ class App:
         self.done_selecting_button=ttk.Button(b,text="Done",command=self.exit_select_mode)
         self.selected_count=tk.StringVar(value="")
         self.selected_count_label=ttk.Label(b,textvariable=self.selected_count,foreground="#666")
-        self.conn=tk.StringVar(); ttk.Label(b,textvariable=self.conn,foreground="#666").pack(side="right")
+        self.conn=tk.StringVar(); ttk.Label(self.root,textvariable=self.conn,foreground="#666").pack(anchor="e",padx=14,pady=(2,10))
 
     def refresh(self):
         for p in vids():
-            k=str(p.resolve()); r=self.data.setdefault(k,{"name":p.name,"duration":0,"furthest":0,"manual":False})
+            k=str(p.resolve()); r=self.data.setdefault(k,{"name":p.name,"duration":0,"furthest":0,"manual":False,"rating":0,"review":""})
+            r.setdefault("rating",0); r.setdefault("review","")
             if not r.get("duration"):
                 d=duration_ffprobe(p)
                 if d:r["duration"]=d
@@ -188,7 +200,7 @@ class App:
             messagebox.showwarning("MPC-BE connection",f"Could not connect on port {MPC_PORT}. Check MPC-BE's web interface settings.")
 
     def draw(self):
-        self.tree.delete(*self.tree.get_children()); total=covered=0
+        self.tree.delete(*self.tree.get_children()); total=covered=0; ratings=[]
         rows=[]
         hidden=set(self.data.get("_hidden", []))
         for p in self.visible_vids():
@@ -198,21 +210,29 @@ class App:
             if d:f=min(f,d)
             total+=d; covered+=f
             status="✓ Watched" if d and f>=d-2 else ("◐ In progress" if f>0 else "○ Not watched")
-            rows.append((p, status, d, f))
-        sort_index={"lecture":0,"status":1,"covered":3,"duration":2,"progress":3}[self.sort_column]
+            rating=float(r.get("rating") or 0)
+            if 1<=rating<=5: ratings.append(rating)
+            rows.append((p, status, d, f, rating, str(r.get("review") or "")))
+        sort_index={"lecture":0,"status":1,"covered":3,"duration":2,"progress":3,"rating":4,"review":5}[self.sort_column]
         if self.sort_column=="lecture":
             rows.sort(key=lambda row: row[0].name.lower(), reverse=self.sort_reverse)
         elif self.sort_column=="status":
             rows.sort(key=lambda row: row[1].lower(), reverse=self.sort_reverse)
+        elif self.sort_column=="review":
+            rows.sort(key=lambda row: row[5].lower(), reverse=self.sort_reverse)
         else:
             rows.sort(key=lambda row: row[sort_index], reverse=self.sort_reverse)
-        for p,status,d,f in rows:
+        for p,status,d,f,rating,review in rows:
             checkbox="☑" if str(p.resolve()) in self.checked else "☐"
             if not self.select_mode: checkbox=""
-            self.tree.insert("", "end", iid=str(p.resolve()), values=(checkbox,p.name,status,fmt(f),fmt(d) if d else "Unknown",f"{f/d*100:.1f}%" if d else "—"))
+            rating_text=f"{rating:g}/5" if 1<=rating<=5 else "—"
+            tag="watched" if d and f>=d-2 else ("progress" if f>0 else "unwatched")
+            self.tree.insert("", "end", iid=str(p.resolve()), values=(checkbox,p.name,status,fmt(f),fmt(d) if d else "Unknown",f"{f/d*100:.1f}%" if d else "—",rating_text,review),tags=(tag,))
         pct=covered/total*100 if total else 0
         self.vars[0].set("Total: "+big(total)); self.vars[1].set("Covered: "+big(covered))
-        self.vars[2].set("Remaining: "+big(max(0,total-covered))); self.vars[3].set(f"Overall: {pct:.1f}%"); self.pb["value"]=pct
+        self.vars[2].set("Remaining: "+big(max(0,total-covered))); self.vars[3].set(f"Overall: {pct:.1f}%")
+        self.vars[4].set(f"Avg rating: {sum(ratings)/len(ratings):.1f}/5" if ratings else "Avg rating: —")
+        self.pb["value"]=pct
         self.selected_count.set(f"{len(self.checked)} selected" if self.select_mode else "")
 
     def sort_tree(self,column):
@@ -224,17 +244,23 @@ class App:
         self.draw()
 
     def tree_click(self,e):
-        if not self.select_mode or self.tree.identify_column(e.x)!="#1": return
         iid=self.tree.identify_row(e.y)
         if not iid:return
+        column=self.tree.identify_column(e.x)
+        if not self.select_mode or column!="#1": return
         if iid in self.checked: self.checked.remove(iid)
         else: self.checked.add(iid)
         self.draw()
         return "break"
 
     def open_lecture(self,e):
+        column=self.tree.identify_column(e.x)
         iid=self.tree.identify_row(e.y)
-        if iid: os.startfile(iid)
+        if not iid:return
+        p=Path(iid)
+        if column=="#2": os.startfile(iid)
+        elif column=="#7": self.edit_rating(p,e)
+        elif column=="#8": self.edit_review(p,e)
 
     def selected(self):
         s=self.tree.selection()
@@ -253,6 +279,7 @@ class App:
         m.add_command(label="○ Mark all selected as not watched" if bulk else "○ Mark as not watched",command=lambda: self.context_watched(p,False))
         m.add_command(label="Set covered time for all selected..." if bulk else "Set covered time...",command=lambda: self.context_settime(p))
         m.add_command(label="Set all selected to current MPC-BE position" if bulk else "Set to current MPC-BE position",command=lambda: self.context_set_current(p))
+        m.add_command(label="Set rating and review for all selected..." if bulk else "Set rating and review...",command=lambda: self.context_rating_review(p))
         m.add_separator()
         if self.select_mode and str(p.resolve()) in self.checked:
             m.add_command(label="Remove all selected",command=lambda: self.remove_selected())
@@ -338,6 +365,90 @@ class App:
             r["furthest"]=max(r.get("furthest",0),info["pos"])
             if info["dur"]:r["duration"]=info["dur"]
             r["manual"]=True
+        save(self.data); self.draw()
+
+    def edit_rating(self,p,event=None):
+        record=self.data[str(p.resolve())]
+        bbox=self.tree.bbox(str(p.resolve()),column="#7")
+        if not bbox:return
+        rating=tk.StringVar(value=str(record.get("rating") or ""))
+        editor=tk.Entry(self.tree,textvariable=rating,justify="center")
+        editor.place(x=bbox[0],y=bbox[1],width=bbox[2],height=bbox[3])
+        editor.focus_set(); editor.select_range(0,tk.END)
+
+        def adjust_rating(event):
+            try:value=float(rating.get() or 0)
+            except ValueError:value=0
+            step=0.5 if event.delta>0 else -0.5
+            rating.set(str(max(0,min(5,round(value+step,1)))))
+            return "break"
+
+        def save_rating(event=None):
+            try:value=float(rating.get().strip() or 0)
+            except ValueError:value=-1
+            if value and not 1<=value<=5:
+                messagebox.showerror("Invalid rating","Choose a rating from 1 to 5, or 0 to clear it.",parent=self.root)
+                editor.focus_set(); return "break"
+            record["rating"]=round(value,1); save(self.data); editor.destroy(); self.draw()
+
+        def cancel_rating(event=None):
+            editor.destroy(); self.draw(); return "break"
+
+        editor.bind("<MouseWheel>",adjust_rating)
+        editor.bind("<Return>",save_rating)
+        editor.bind("<FocusOut>",save_rating)
+        editor.bind("<Escape>",cancel_rating)
+
+    def edit_review(self,p,event=None):
+        record=self.data[str(p.resolve())]
+        window=tk.Toplevel(self.root); window.title("Review lecture"); window.geometry("520x300")
+        window.transient(self.root); window.grab_set()
+        ttk.Label(window,text=p.name).pack(anchor="w",padx=14,pady=(14,6))
+        editor=tk.Text(window,height=9,wrap="word")
+        editor.pack(fill="both",expand=True,padx=14,pady=6)
+        editor.insert("1.0",str(record.get("review") or "")); editor.focus_set()
+        self.position_popup(window,event)
+
+        def save_review():
+            record["review"]=editor.get("1.0",tk.END).strip()
+            save(self.data); self.draw(); window.destroy()
+
+        buttons=ttk.Frame(window); buttons.pack(fill="x",padx=14,pady=14)
+        ttk.Button(buttons,text="Save",command=save_review).pack(side="left")
+        ttk.Button(buttons,text="Cancel",command=window.destroy).pack(side="right")
+
+    def position_popup(self,window,event):
+        if event:
+            x=self.root.winfo_rootx()+event.x+12
+            y=self.root.winfo_rooty()+event.y+12
+            window.geometry(f"+{x}+{y}")
+
+    def context_rating_review(self,p):
+        paths=self.context_paths(p)
+        current=self.data[str(paths[0].resolve())] if len(paths)==1 else {}
+        value=simpledialog.askstring(
+            "Rating",
+            "Enter a rating from 1 to 5 (blank or 0 clears it):",
+            initialvalue=str(current.get("rating") or "") if len(paths)==1 else "",
+            parent=self.root
+        )
+        if value is None:return
+        try:
+            rating=float(value.strip()) if value.strip() else 0
+            if rating!=0 and not 1<=rating<=5:raise ValueError
+        except ValueError:
+            messagebox.showerror("Invalid rating","Enter a number from 1 to 5, or 0 to clear the rating.")
+            return
+        review=simpledialog.askstring(
+            "Review",
+            "Enter a review:",
+            initialvalue=str(current.get("review") or "") if len(paths)==1 else "",
+            parent=self.root
+        )
+        if review is None:return
+        for selected in paths:
+            record=self.data[str(selected.resolve())]
+            record["rating"]=rating; record["review"]=review.strip()
         save(self.data); self.draw()
 
     def mark_selected(self,watched):

@@ -27,6 +27,7 @@ The app supports common video formats including MP4, MKV, AVI, WebM, MOV, M4V, T
 
 Progress is stored in `.lecture_progress.json` inside the selected video folder. That file is ignored by Git because it is specific to each user.
 Checkbox selections are temporary and are cleared when selection mode is closed or the app is restarted.
+Ratings use a 1-5 scale. The average rating excludes lectures without a rating, and ratings/reviews are included in progress exports.
 
 ## Features
 
@@ -34,9 +35,13 @@ Checkbox selections are temporary and are cleared when selection mode is closed 
 - Reads the currently playing file and position from MPC-BE.
 - Tracks the furthest position reached for each lecture.
 - Shows total, covered, remaining, and overall progress.
+- Stores a 1-5 rating and review for each lecture and shows the average rating.
+- Double-click a Rating cell to open the rating spinner; use its arrows or mouse wheel to adjust the value.
+- Double-click a Review cell to edit the review in a multiline text box and save it.
+- Colors identify watched, in-progress, and not-watched lecture rows.
 - Searches lectures by filename.
 - Refreshes the folder automatically every 10 seconds.
-- Opens a lecture in the Windows default video player when double-clicked.
+- Opens a lecture in the Windows default video player when double-clicking its Lecture cell.
 - Exports and imports progress using portable JSON files.
 - Allows the MPC-BE web interface port to be changed and tested.
 - Sorts the lecture table by clicking any column heading; click again to reverse the order.
