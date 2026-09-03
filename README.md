@@ -33,7 +33,10 @@ Progress is stored in `.lecture_progress.json` inside the selected video folder.
 - Reads the currently playing file and position from MPC-BE.
 - Tracks the furthest position reached for each lecture.
 - Shows total, covered, remaining, and overall progress.
+- Sorts the lecture table by clicking any column heading; click again to reverse the order.
 - Allows lectures to be marked watched or unwatched manually.
+- Allows lectures to be removed from the tracker without deleting the video file.
+- Allows removed lectures to be restored with the `Restore Removed` button.
 - Allows covered time to be entered manually.
 - Can inspect common MPC-BE/MPC-HC recent-file registry locations.
 

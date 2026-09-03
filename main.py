@@ -110,6 +110,7 @@ class App:
         ttk.Button(b,text="Refresh",command=self.refresh).pack(side="left")
         ttk.Button(b,text="Import MPC-BE History",command=self.import_history).pack(side="left",padx=7)
         ttk.Button(b,text="Open Folder",command=lambda:os.startfile(str(VIDEO_DIR))).pack(side="left")
+        ttk.Button(b,text="Restore Removed",command=self.restore_removed).pack(side="left",padx=7)
         self.conn=tk.StringVar(); ttk.Label(b,textvariable=self.conn,foreground="#666").pack(side="right")
 
     def refresh(self):
@@ -123,14 +124,22 @@ class App:
     def draw(self):
         self.tree.delete(*self.tree.get_children()); total=covered=0
         rows=[]
+        hidden=set(self.data.get("_hidden", []))
         for p in vids():
-            r=self.data[str(p.resolve())]; d=float(r.get("duration") or 0); f=float(r.get("furthest") or 0)
+            key=str(p.resolve())
+            if key in hidden: continue
+            r=self.data[key]; d=float(r.get("duration") or 0); f=float(r.get("furthest") or 0)
             if d:f=min(f,d)
             total+=d; covered+=f
             status="✓ Watched" if d and f>=d-2 else ("◐ In progress" if f>0 else "○ Not watched")
             rows.append((p, status, d, f))
         sort_index={"lecture":0,"status":1,"covered":3,"duration":2,"progress":3}[self.sort_column]
-        rows.sort(key=lambda row: row[sort_index].lower() if sort_index in (0,1) else row[sort_index], reverse=self.sort_reverse)
+        if self.sort_column=="lecture":
+            rows.sort(key=lambda row: row[0].name.lower(), reverse=self.sort_reverse)
+        elif self.sort_column=="status":
+            rows.sort(key=lambda row: row[1].lower(), reverse=self.sort_reverse)
+        else:
+            rows.sort(key=lambda row: row[sort_index], reverse=self.sort_reverse)
         for p,status,d,f in rows:
             self.tree.insert("", "end", iid=str(p.resolve()), values=(p.name,status,fmt(f),fmt(d) if d else "Unknown",f"{f/d*100:.1f}%" if d else "—"))
         pct=covered/total*100 if total else 0
@@ -158,6 +167,8 @@ class App:
         m.add_command(label="○ Mark as not watched",command=lambda: self.unwatched(p))
         m.add_command(label="Set covered time...",command=lambda: self.settime(p))
         m.add_command(label="Set to current MPC-BE position",command=lambda: self.set_current(p))
+        m.add_separator()
+        m.add_command(label="Remove from tracker",command=lambda: self.remove_from_tracker(p))
         try:
             m.tk_popup(e.x_root,e.y_root)
         finally:
@@ -201,6 +212,55 @@ class App:
         r=self.data[str(p.resolve())]; r["furthest"]=max(r.get("furthest",0),info["pos"])
         if info["dur"]:r["duration"]=info["dur"]
         r["manual"]=True;save(self.data);self.draw()
+
+    def remove_from_tracker(self,p=None):
+        p=p or self.selected()
+        if not p:return
+        if not messagebox.askyesno(
+            "Remove from tracker",
+            f"Remove this lecture from the tracker?\n\n{p.name}\n\nThe video file will not be deleted."
+        ): return
+        key=str(p.resolve())
+        hidden=self.data.setdefault("_hidden", [])
+        if key not in hidden: hidden.append(key)
+        save(self.data); self.draw()
+
+    def restore_removed(self):
+        hidden=self.data.get("_hidden", [])
+        available=[Path(key) for key in hidden if Path(key).exists()]
+        if not available:
+            messagebox.showinfo("Restore removed", "There are no removed lectures available to restore.")
+            return
+
+        window=tk.Toplevel(self.root)
+        window.title("Restore removed lectures")
+        window.geometry("620x320")
+        window.transient(self.root)
+        ttk.Label(window,text="Select lectures to restore:").pack(anchor="w",padx=12,pady=(12,4))
+        select_all=tk.BooleanVar(value=False)
+        list_frame=ttk.Frame(window)
+        list_frame.pack(fill="both",expand=True,padx=12,pady=4)
+        checks=[]
+
+        def toggle_all():
+            for checked in checks: checked.set(select_all.get())
+
+        ttk.Checkbutton(window,text="Select all",variable=select_all,command=toggle_all).pack(anchor="w",padx=12)
+        for p in available:
+            checked=tk.BooleanVar(value=False)
+            checks.append(checked)
+            ttk.Checkbutton(list_frame,text=p.name,variable=checked).pack(anchor="w")
+
+        def restore_selected():
+            selected=[index for index,checked in enumerate(checks) if checked.get()]
+            if not selected:return
+            restored={str(available[index].resolve()) for index in selected}
+            self.data["_hidden"]=[key for key in hidden if key not in restored]
+            save(self.data); self.draw(); window.destroy()
+
+        buttons=ttk.Frame(window); buttons.pack(fill="x",padx=12,pady=12)
+        ttk.Button(buttons,text="Restore selected",command=restore_selected).pack(side="left")
+        ttk.Button(buttons,text="Cancel",command=window.destroy).pack(side="right")
 
     def import_history(self):
         hist=registry_history()
