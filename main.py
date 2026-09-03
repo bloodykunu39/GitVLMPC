@@ -98,19 +98,24 @@ class App:
         self.npb=ttk.Progressbar(n,maximum=100); ttk.Label(n,textvariable=self.now,font=("Segoe UI",11,"bold")).pack(anchor="w")
         self.npb.pack(fill="x",pady=5); ttk.Label(n,textvariable=self.nd).pack(anchor="w")
         body=ttk.Frame(self.root,padding=(14,0,14,10)); body.pack(fill="both",expand=True)
-        cols=("lecture","status","covered","duration","progress"); self.tree=ttk.Treeview(body,columns=cols,show="headings")
+        cols=("select","lecture","status","covered","duration","progress"); self.tree=ttk.Treeview(body,columns=cols,show="headings")
         self.sort_column="lecture"; self.sort_reverse=False
-        for c,t,w in zip(cols,("Lecture","Status","Covered","Duration","Progress"),(550,120,130,130,100)):
+        self.select_mode=False; self.checked=set()
+        for c,t,w in zip(cols,("Select","Lecture","Status","Covered","Duration","Progress"),(0,550,120,130,130,100)):
             self.tree.heading(c,text=t,command=lambda column=c: self.sort_tree(column))
-            self.tree.column(c,width=w,anchor="w" if c=="lecture" else "center")
+            self.tree.column(c,width=w,anchor="w" if c=="lecture" else "center",stretch=c!="select")
         self.tree.pack(side="left",fill="both",expand=True)
         sc=ttk.Scrollbar(body,command=self.tree.yview); sc.pack(side="right",fill="y"); self.tree.configure(yscrollcommand=sc.set)
         self.tree.bind("<Button-3>",self.menu)
+        self.tree.bind("<Button-1>",self.tree_click)
         b=ttk.Frame(self.root,padding=(14,0,14,14)); b.pack(fill="x")
         ttk.Button(b,text="Refresh",command=self.refresh).pack(side="left")
         ttk.Button(b,text="Import MPC-BE History",command=self.import_history).pack(side="left",padx=7)
         ttk.Button(b,text="Open Folder",command=lambda:os.startfile(str(VIDEO_DIR))).pack(side="left")
         ttk.Button(b,text="Restore Removed",command=self.restore_removed).pack(side="left",padx=7)
+        self.select_all_button=ttk.Button(b,text="Select all",command=self.select_all)
+        self.unselect_all_button=ttk.Button(b,text="Unselect all",command=self.unselect_all)
+        self.done_selecting_button=ttk.Button(b,text="Done",command=self.exit_select_mode)
         self.conn=tk.StringVar(); ttk.Label(b,textvariable=self.conn,foreground="#666").pack(side="right")
 
     def refresh(self):
@@ -141,17 +146,29 @@ class App:
         else:
             rows.sort(key=lambda row: row[sort_index], reverse=self.sort_reverse)
         for p,status,d,f in rows:
-            self.tree.insert("", "end", iid=str(p.resolve()), values=(p.name,status,fmt(f),fmt(d) if d else "Unknown",f"{f/d*100:.1f}%" if d else "—"))
+            checkbox="☑" if str(p.resolve()) in self.checked else "☐"
+            if not self.select_mode: checkbox=""
+            self.tree.insert("", "end", iid=str(p.resolve()), values=(checkbox,p.name,status,fmt(f),fmt(d) if d else "Unknown",f"{f/d*100:.1f}%" if d else "—"))
         pct=covered/total*100 if total else 0
         self.vars[0].set("Total: "+big(total)); self.vars[1].set("Covered: "+big(covered))
         self.vars[2].set("Remaining: "+big(max(0,total-covered))); self.vars[3].set(f"Overall: {pct:.1f}%"); self.pb["value"]=pct
 
     def sort_tree(self,column):
+        if column=="select": return
         if self.sort_column==column:
             self.sort_reverse=not self.sort_reverse
         else:
             self.sort_column=column; self.sort_reverse=False
         self.draw()
+
+    def tree_click(self,e):
+        if not self.select_mode or self.tree.identify_column(e.x)!="#1": return
+        iid=self.tree.identify_row(e.y)
+        if not iid:return
+        if iid in self.checked: self.checked.remove(iid)
+        else: self.checked.add(iid)
+        self.draw()
+        return "break"
 
     def selected(self):
         s=self.tree.selection()
@@ -162,17 +179,134 @@ class App:
         if not iid:return
         self.tree.selection_set(iid)
         p=Path(iid)
+        bulk=self.select_mode and str(p.resolve()) in self.checked
         m=tk.Menu(self.root,tearoff=0)
-        m.add_command(label="✓ Mark as watched",command=lambda: self.watched(p))
-        m.add_command(label="○ Mark as not watched",command=lambda: self.unwatched(p))
-        m.add_command(label="Set covered time...",command=lambda: self.settime(p))
-        m.add_command(label="Set to current MPC-BE position",command=lambda: self.set_current(p))
+        m.add_command(label="Unselect" if bulk else "Select",command=lambda: self.toggle_select(p))
         m.add_separator()
-        m.add_command(label="Remove from tracker",command=lambda: self.remove_from_tracker(p))
+        m.add_command(label="✓ Mark all selected as watched" if bulk else "✓ Mark as watched",command=lambda: self.context_watched(p,True))
+        m.add_command(label="○ Mark all selected as not watched" if bulk else "○ Mark as not watched",command=lambda: self.context_watched(p,False))
+        m.add_command(label="Set covered time for all selected..." if bulk else "Set covered time...",command=lambda: self.context_settime(p))
+        m.add_command(label="Set all selected to current MPC-BE position" if bulk else "Set to current MPC-BE position",command=lambda: self.context_set_current(p))
+        m.add_separator()
+        if self.select_mode and str(p.resolve()) in self.checked:
+            m.add_command(label="Remove all selected",command=lambda: self.remove_selected())
+        else:
+            m.add_command(label="Remove from tracker",command=lambda: self.context_remove(p))
         try:
             m.tk_popup(e.x_root,e.y_root)
         finally:
             m.grab_release()
+
+    def enable_select(self,p=None):
+        self.select_mode=True
+        if p: self.checked.add(str(p.resolve()))
+        self.tree.column("select",width=55,stretch=False)
+        self.select_all_button.pack(side="left",padx=7)
+        self.unselect_all_button.pack(side="left",padx=7)
+        self.done_selecting_button.pack(side="left",padx=7)
+        self.draw()
+
+    def toggle_select(self,p):
+        key=str(p.resolve())
+        if self.select_mode and key in self.checked:
+            self.checked.remove(key)
+            self.draw()
+        else:
+            self.enable_select(p)
+
+    def select_all(self):
+        self.checked={str(p.resolve()) for p in vids() if str(p.resolve()) not in set(self.data.get("_hidden", []))}
+        self.draw()
+
+    def unselect_all(self):
+        self.checked.clear()
+        self.draw()
+
+    def selected_paths(self):
+        return [Path(key) for key in self.checked if self.tree.exists(key)]
+
+    def context_paths(self,p):
+        if self.select_mode and str(p.resolve()) in self.checked:
+            return self.selected_paths()
+        return [p]
+
+    def context_watched(self,p,watched):
+        paths=self.context_paths(p)
+        if len(paths)==1:
+            (self.watched if watched else self.unwatched)(paths[0])
+        else:
+            self.mark_selected(watched)
+
+    def context_remove(self,p):
+        paths=self.context_paths(p)
+        if len(paths)==1:
+            self.remove_from_tracker(paths[0])
+        else:
+            self.remove_selected()
+
+    def context_settime(self,p):
+        paths=self.context_paths(p)
+        if len(paths)==1:
+            self.settime(paths[0])
+            return
+        x=simpledialog.askstring("Set covered time",f"Enter the covered time for {len(paths)} selected lectures:\n\nExamples: 1:23:45 or 83:45")
+        if not x:return
+        try:
+            parts=[int(z) for z in x.split(":")]
+            sec=parts[0]*3600+parts[1]*60+parts[2] if len(parts)==3 else parts[0]*60+parts[1]
+            if sec<0:raise ValueError
+        except (ValueError,IndexError):
+            messagebox.showerror("Invalid time","Use MM:SS or H:MM:SS.")
+            return
+        for selected in paths:
+            r=self.data[str(selected.resolve())]; d=r.get("duration") or 0
+            r["furthest"]=max(0,min(sec,d)) if d else sec; r["manual"]=True
+        save(self.data); self.draw()
+
+    def context_set_current(self,p):
+        paths=self.context_paths(p); info=mpc()
+        if not info:return
+        for selected in paths:
+            r=self.data[str(selected.resolve())]
+            r["furthest"]=max(r.get("furthest",0),info["pos"])
+            if info["dur"]:r["duration"]=info["dur"]
+            r["manual"]=True
+        save(self.data); self.draw()
+
+    def mark_selected(self,watched):
+        paths=self.selected_paths()
+        if not paths:return
+        for p in paths:
+            r=self.data[str(p.resolve())]
+            if watched:
+                d=r.get("duration") or duration_ffprobe(p)
+                if not d:
+                    messagebox.showerror("Duration unavailable",f"Could not detect the duration of:\n\n{p.name}")
+                    continue
+                r["duration"]=d; r["furthest"]=d
+            else:
+                r["furthest"]=0
+            r["manual"]=True
+        save(self.data); self.draw()
+
+    def remove_selected(self):
+        paths=self.selected_paths()
+        if not paths:return
+        if not messagebox.askyesno("Remove selected",f"Remove {len(paths)} lecture(s) from the tracker?\n\nThe video files will not be deleted."):
+            return
+        hidden=self.data.setdefault("_hidden", [])
+        for p in paths:
+            key=str(p.resolve())
+            if key not in hidden:hidden.append(key)
+        save(self.data)
+        self.exit_select_mode()
+
+    def exit_select_mode(self):
+        self.select_mode=False; self.checked.clear()
+        for button in (self.select_all_button,self.unselect_all_button,self.done_selecting_button):
+            button.pack_forget()
+        self.tree.column("select",width=0,stretch=False)
+        self.draw()
 
     def watched(self,p=None):
         p=p or self.selected()

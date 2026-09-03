@@ -26,6 +26,7 @@ Python packages are not required. The app uses only the Python standard library.
 The app supports common video formats including MP4, MKV, AVI, WebM, MOV, M4V, TS, M2TS, FLV, WMV, MPG, and MPEG.
 
 Progress is stored in `.lecture_progress.json` inside the selected video folder. That file is ignored by Git because it is specific to each user.
+Checkbox selections are temporary and are cleared when selection mode is closed or the app is restarted.
 
 ## Features
 
@@ -34,6 +35,9 @@ Progress is stored in `.lecture_progress.json` inside the selected video folder.
 - Tracks the furthest position reached for each lecture.
 - Shows total, covered, remaining, and overall progress.
 - Sorts the lecture table by clicking any column heading; click again to reverse the order.
+- Enables checkbox selection from a lecture's right-click menu and supports selecting all visible lectures.
+- Provides right-click actions to mark lectures watched or unwatched, remove them from the tracker, or exit selection mode.
+- In selection mode, applies watched status, covered time, and current MPC-BE position actions to all checked lectures.
 - Allows lectures to be marked watched or unwatched manually.
 - Allows lectures to be removed from the tracker without deleting the video file.
 - Allows removed lectures to be restored with the `Restore Removed` button.
