@@ -455,14 +455,11 @@ class FocusSoundEngine:
 
     def stop(self):
         with self._lock:
+            if not self._playing and not self._stream:
+                return
             self._playing = False
-            if self._stream:
-                try:
-                    self._stream.stop(ignore_errors=True)
-                    self._stream.close(ignore_errors=True)
-                except Exception:
-                    pass
-                self._stream = None
+            stream_to_close = self._stream
+            self._stream = None
             if self._pg_initialized:
                 try:
                     import pygame
@@ -470,12 +467,22 @@ class FocusSoundEngine:
                 except Exception:
                     pass
 
+        # Close stream in a background thread so UI thread is never blocked
+        if stream_to_close:
+            def _async_close(s):
+                try:
+                    s.stop(ignore_errors=True)
+                    s.close(ignore_errors=True)
+                except Exception:
+                    pass
+            threading.Thread(target=_async_close, args=(stream_to_close,), daemon=True).start()
+
     def _sine_callback(self, outdata, frames, time_info, status):
         import numpy as np
         sr = 44100.0
         vol = self._volume
-        # Check deadline
-        if self._stop_after is not None and time.monotonic() >= self._stop_after:
+        # Check deadline or if playing has been stopped
+        if not self._playing or (self._stop_after is not None and time.monotonic() >= self._stop_after):
             outdata[:] = 0
             import sounddevice as _sd_mod
             raise _sd_mod.CallbackStop()  # clean stop — no "Exception ignored" spam
@@ -630,6 +637,9 @@ class App:
         if hasattr(self, "timer_badge") and hasattr(self, "timer_label"):
             self.timer_badge.configure(bg=t["stopwatch_bg"], highlightbackground=t["border"], highlightcolor=t["border"])
             self.timer_label.configure(bg=t["stopwatch_bg"], fg=t["stopwatch_fg"])
+
+        if hasattr(self, "_update_sound_buttons"):
+            self._update_sound_buttons()
 
         menu_opts = {
             "bg": t["card_bg"], "fg": t["fg"],
@@ -983,10 +993,13 @@ class App:
 
         # ▶ Play / ⏸ Pause test buttons
         self._test_playing = False
-        self._play_btn = ttk.Button(sound_row, text="▶ Play", command=self._play_test)
-        self._play_btn.pack(side="left", padx=(0, 3))
-        self._pause_btn = ttk.Button(sound_row, text="⏸ Pause", command=self._pause_test,
-                                     state="disabled")
+        self._play_btn = tk.Button(sound_row, text="▶ Play", command=self._toggle_test_sound,
+                                   font=("Segoe UI", 9, "bold"), relief="solid", bd=1,
+                                   padx=8, pady=2, cursor="hand2")
+        self._play_btn.pack(side="left", padx=(0, 4))
+        self._pause_btn = tk.Button(sound_row, text="⏸ Pause", command=self._pause_test,
+                                    font=("Segoe UI", 9, "bold"), relief="solid", bd=1,
+                                    padx=8, pady=2, cursor="hand2", state="disabled")
         self._pause_btn.pack(side="left")
 
         # ── Collapsible settings panel (hidden by default) ────────────────────
@@ -2171,8 +2184,59 @@ class App:
             self._settings_btn.configure(text="⚙ Settings ▾")
         self._settings_open = not self._settings_open
 
+    def _update_sound_buttons(self):
+        """Update visual styling of Play and Pause buttons so user knows sound is on."""
+        if not hasattr(self, "_play_btn") or not hasattr(self, "_pause_btn"):
+            return
+        t = THEMES.get(getattr(self, "current_theme", "amoled"), THEMES["amoled"])
+        is_enabled = self.reminder_enabled.get()
+        is_active = getattr(self, "_test_playing", False) or (hasattr(self, "sound_engine") and self.sound_engine.is_playing)
+
+        if not is_enabled:
+            self._play_btn.configure(
+                text="▶ Play", state="disabled",
+                bg=t["card_bg"], fg=t["muted"],
+                activebackground=t["card_bg"], activeforeground=t["muted"]
+            )
+            self._pause_btn.configure(
+                text="⏸ Pause", state="disabled",
+                bg=t["card_bg"], fg=t["muted"],
+                activebackground=t["card_bg"], activeforeground=t["muted"]
+            )
+        elif is_active:
+            # Sound is ON: Make Play button vibrant green with white text so user clearly knows it's playing!
+            self._play_btn.configure(
+                text="🔊 Playing ●", state="normal",
+                bg="#238636", fg="#ffffff",
+                activebackground="#2ea043", activeforeground="#ffffff"
+            )
+            self._pause_btn.configure(
+                text="⏸ Pause", state="normal",
+                bg="#da3633", fg="#ffffff",
+                activebackground="#f85149", activeforeground="#ffffff"
+            )
+        else:
+            # Sound is OFF / IDLE: standard clean theme styling
+            self._play_btn.configure(
+                text="▶ Play", state="normal",
+                bg=t["card_bg"], fg=t["accent"],
+                activebackground=t["border"], activeforeground=t["accent_text"]
+            )
+            self._pause_btn.configure(
+                text="⏸ Pause", state="disabled",
+                bg=t["card_bg"], fg=t["muted"],
+                activebackground=t["card_bg"], activeforeground=t["muted"]
+            )
+
+    def _toggle_test_sound(self):
+        """Toggle test sound on or off immediately on click."""
+        if getattr(self, "_test_playing", False) or (hasattr(self, "sound_engine") and self.sound_engine.is_playing):
+            self._pause_test()
+        else:
+            self._play_test()
+
     def _play_test(self):
-        """Start test sound playing indefinitely."""
+        """Start test sound playing indefinitely with instant visual feedback."""
         FocusSoundEngine._check_libs()
         mode = self.sound_mode.get()
         if mode == "sine" and not FocusSoundEngine._sd_ok:
@@ -2183,19 +2247,17 @@ class App:
             messagebox.showinfo("Missing libraries",
                                 FocusSoundEngine.missing_libs_message("mp3"), parent=self.root)
             return
-        self.save_focus_sound_settings()
-        self.sound_engine.stop()
-        self.sound_engine.play()       # no duration_s → plays until stopped
         self._test_playing = True
-        self._play_btn.configure(state="disabled")
-        self._pause_btn.configure(text="⏸ Pause", state="normal")
+        self._update_sound_buttons()       # immediate UI color change (0ms)
+        self.sound_engine.stop()
+        self.sound_engine.play()          # no duration_s -> plays until stopped
+        self.save_focus_sound_settings()
 
     def _pause_test(self):
-        """Pause (stop) the test sound."""
-        self.sound_engine.stop()
+        """Pause (stop) the test sound immediately with instant visual feedback."""
         self._test_playing = False
-        self._play_btn.configure(state="normal")
-        self._pause_btn.configure(state="disabled")
+        self._update_sound_buttons()       # immediate UI color change (0ms)
+        self.sound_engine.stop()
 
     def _on_reminder_toggle(self):
         """Grey out controls when reminder is disabled; save on every change."""
@@ -2204,13 +2266,12 @@ class App:
         for w in self._sound_controls():
             try: w.configure(state=state)
             except Exception: pass
-        # Also gate Settings and Play/Pause buttons
-        for btn in (getattr(self, "_settings_btn", None),
-                    getattr(self, "_play_btn", None),
-                    getattr(self, "_pause_btn", None)):
-            if btn:
-                try: btn.configure(state=state)
-                except Exception: pass
+        if getattr(self, "_settings_btn", None):
+            try: self._settings_btn.configure(state=state)
+            except Exception: pass
+        if not enabled:
+            self._pause_test()
+        self._update_sound_buttons()
         if hasattr(self, "sound_engine"):
             self.save_focus_sound_settings()
 
@@ -2275,8 +2336,13 @@ class App:
             self.sound_engine.stop()
             if chime_mode == "loop":
                 self.sound_engine.play()  # plays until stopped
+                self._test_playing = True
+                self._update_sound_buttons()
             else:
                 self.sound_engine.play(duration_s=3)
+                self._test_playing = True
+                self._update_sound_buttons()
+                self.root.after(3200, lambda: (setattr(self, "_test_playing", False), self._update_sound_buttons()))
         self._show_reminder_toast(is_loop=(chime_mode == "loop"))
 
     def _show_reminder_toast(self, is_loop=False):
@@ -2295,7 +2361,9 @@ class App:
             lbl.pack(fill="both", expand=True)
 
             def _dismiss(e=None):
+                self._test_playing = False
                 self.sound_engine.stop()
+                self._update_sound_buttons()
                 try: toast.destroy()
                 except Exception: pass
 
@@ -2303,7 +2371,7 @@ class App:
             toast.bind("<Button-1>", _dismiss)
 
             if not is_loop:
-                toast.after(4000, toast.destroy)
+                toast.after(4000, lambda: (setattr(self, "_test_playing", False), self._update_sound_buttons(), toast.destroy()))
         except Exception:
             pass
 
@@ -3166,10 +3234,12 @@ class App:
     def start_session(self):
         if self.session and self.session["status"]=="paused":
             self._reminder_elapsed = 0  # reset countdown on resume
+            self._auto_paused_session = False
             self.session["status"]="active"; self.session["resumed_at"]=datetime.now().isoformat(timespec="seconds"); self.update_session_display(); return
         if self.session:return
         counter=int(self.data.get("_session_counter",0) or 0)+1
         self.data["_session_counter"]=counter
+        self._auto_paused_session = False
         self.session={"id":f"Session{counter:04d}","status":"active","started_at":datetime.now().isoformat(timespec="seconds"),"total":0,"video_total":0,"segments":[]}
         save(self.data)
         self._reminder_elapsed = 0  # reset countdown on new session
@@ -3179,6 +3249,8 @@ class App:
         if not self.session:return
         self.sound_engine.stop()          # stop reminder sound on pause
         self._reminder_elapsed = 0        # reset countdown
+        if not getattr(self, "_auto_paused_session", False):
+            self._auto_paused_session = False
         self.track_activity(self.current_info,self.find_current_lecture(self.current_info)); self.finish_segment(); self.session["status"]="paused"; self.update_session_display(); save(self.data)
 
     def stop_session(self,save_session=True):
@@ -3638,13 +3710,18 @@ class App:
             self.start_session()
             needs_redraw = True
 
-        if self.auto_pause_on_video.get() and self.session:
-            if self.session.get("status") == "active" and not self.is_playing(info):
+        # Auto-pause / resume transitions based on media player playback state
+        cur_playing = self.is_playing(info)
+        prev_playing = getattr(self, "_last_video_playing", None)
+        self._last_video_playing = cur_playing
+
+        if self.auto_pause_on_video.get() and self.session and prev_playing is not None:
+            if prev_playing and not cur_playing and self.session.get("status") == "active":
+                self._auto_paused_session = True
                 self.pause_session()
-                needs_redraw = True
-            elif self.session.get("status") == "paused" and self.is_playing(info):
+            elif not prev_playing and cur_playing and self.session.get("status") == "paused" and getattr(self, "_auto_paused_session", False):
+                self._auto_paused_session = False
                 self.start_session()
-                needs_redraw = True
 
         self.track_activity(info, lecture)
         if lecture and self.session and self.session["status"] == "active":
@@ -3655,7 +3732,6 @@ class App:
             self.timer_lecture.set("Waiting...")
         if self.session:
             self.update_session_display()
-            needs_redraw = True
 
         if needs_redraw:
             self.draw()
