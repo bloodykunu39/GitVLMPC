@@ -583,13 +583,35 @@ class App:
         self.main_canvas.bind("<Configure>", _resize_content)
 
         def _on_mousewheel(event):
-            widget = self.root.winfo_containing(event.x_root, event.y_root)
-            if widget:
-                w_str = str(widget).lower()
+            if not event.delta:
+                return
+            count = int(-1 * (event.delta / 120))
+            step = count if count != 0 else (-1 if event.delta > 0 else 1)
+
+            target = self.root.winfo_containing(event.x_root, event.y_root)
+            tree_widget = None
+            w = target
+            while w:
+                w_str = str(w).lower()
                 if "treeview" in w_str:
-                    widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
-                    return "break"
-            self.main_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                    tree_widget = w
+                    break
+                w = getattr(w, "master", None)
+
+            if tree_widget:
+                try:
+                    first, last = tree_widget.yview()
+                    if step > 0 and last < 0.999:
+                        tree_widget.yview_scroll(step, "units")
+                        return "break"
+                    elif step < 0 and first > 0.001:
+                        tree_widget.yview_scroll(step, "units")
+                        return "break"
+                except Exception:
+                    pass
+
+            self.main_canvas.yview_scroll(step * 2, "units")
+            return "break"
 
         self.main_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
@@ -1287,13 +1309,21 @@ class App:
         self.activity_filter=session_id
         self.draw_activity()
 
+    def update_scrollregion(self, event=None):
+        try:
+            self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+        except Exception:
+            pass
+
     def hide_activity(self):
         self.activity_frame.pack_forget()
         self.show_activity_button.pack(fill="x",padx=14,pady=(0,10),before=self.body_frame)
+        self.root.after_idle(self.update_scrollregion)
 
     def show_activity(self):
         self.show_activity_button.pack_forget()
         self.activity_frame.pack(fill="x",padx=14,pady=(0,10),before=self.body_frame)
+        self.root.after_idle(self.update_scrollregion)
 
     def add_manual_segment(self):
         lecture=simpledialog.askstring("Manual segment","Lecture file name:",parent=self.root)
