@@ -103,6 +103,12 @@ The resulting single-file executable is created in `dist/GitVLMPC.exe`. It can b
 
 ### Study Stopwatch & Live Reminder System
 - **Digital Study Stopwatch**: High-contrast stopwatch with Start, Pause, and End controls.
+- **Stopwatch Time Badge Right-Click Menu**: Right-clicking the stopwatch time badge (`00:00:00`) offers session controls:
+  - **⏱ Adjust Session Time**: Instantly add or subtract elapsed time (`+15 min`, `+5 min`, `+1 min`, `-1 min`, `-5 min`, `-15 min`).
+  - **Auto-pause when Video Pauses**: Toggleable auto-pause mode that pauses your study session when the media player pauses or stops, and resumes when video playback starts.
+  - **📋 Copy Session Duration**: Copies formatted session elapsed time to the Windows clipboard.
+  - **Quick Session Controls**: Start, Pause, Resume, or End study sessions directly from the menu.
+  - **📜 Study Session History**: One-click access to historical session logs.
 - **Compact Lecture Badge**: Intelligently truncates long lecture filenames to save space (e.g. `First...End.mp4`) while displaying the full lecture title in a smooth hover tooltip.
 - **Live Reminder Countdown Badge**: Displays remaining time until next study reminder chime (`[ 00:44:32 ]`).
 - **Hover Information Tooltip**: Hovering over the countdown displays a near-mouse tooltip showing master status, live remaining time, sound engine details, volume, and quick interaction tips:
@@ -111,24 +117,35 @@ The resulting single-file executable is created in `dist/GitVLMPC.exe`. It can b
   Right-click for timer options
   ```
 - **Right-Click Timer Context Menu**: Right-clicking the timer label provides complete timer management:
-  - Quick Add Time panel
-  - Direct Edit Timer scroller
-  - Cascading Presets sub-menu (+45m, +15m, etc.)
-  - Restart Countdown from start
-  - Reset to default interval (45m)
-  - Toggle Reminder On/Off
-  - Sound Settings shortcut
-  - Test Play / Pause controls
+  - **➕ Quick Add Time**: Opens the inline floating presets panel on the right side.
+  - **✏️ Direct Edit Timer**: Opens inline HH:MM:SS scroller to directly edit the live timer.
+  - **⏰ Remind at Clock Time**: Sets reminder to target a specific wall-clock time (e.g. 05:30) with mousewheel HH:MM scrollers and live countdown preview.
+  - **🎬 Match Video Remaining**: Instantly syncs the reminder countdown to the remaining time of the currently playing lecture video.
+  - **🧠 Binaural Focus Modes**: One-click switching to scientifically tuned brainwave frequencies:
+    - *Theta (4 Hz)* — Deep Focus (200 / 204 Hz)
+    - *Alpha (10 Hz)* — Flow State (200 / 210 Hz)
+    - *Beta (18 Hz)* — Active Problem Solving (200 / 218 Hz)
+    - *Delta (2 Hz)* — Deep Relaxation (200 / 202 Hz)
+    - *Gamma (40 Hz)* — Peak Cognition (200 / 240 Hz)
+  - **📅 Standard Study Intervals**: Quick presets for *Pomodoro (25m)*, *Standard (45m)*, *Deep Work (60m)*, *Ultradian Sprint (90m)*, *Quick Break (5m)*, and *Long Break (15m)*.
+  - **🔊 Volume Level Submenu**: Quick volume selection (100%, 80%, 60%, 40%, 20%, Mute).
+  - **🔔 Chime Behavior**: Select between *Single Chime (3s)*, *Continuous Loop (until clicked)*, and *Silent Visual Flash Only*.
+  - **🔄 Restart Countdown**: Restarts countdown from its beginning value.
+  - **⏱ Reset Interval to Default (45m)**: Restores default 45-minute study cycle.
+  - **Toggle Reminder On/Off**, **⚙ Sound Settings**, and **Test Play / Pause**.
 - **Inline Quick-Add Panel (Right-Side Placement)**:
   - Single-clicking the live countdown opens a sleek floating panel placed directly on the **right side** of the label (no `tk.Toplevel` popup windows).
   - Automatically closes when clicking anywhere outside.
 - **5 Sub-Buttons Total (4 Presets + 1 Custom)**:
   - **4 Preset Buttons** (Default: `+00:45:00`, `+00:15:00`, `+00:30:00`, `+00:05:00`): Left-clicking immediately adds/subtracts time relative to the live running countdown.
   - **Preset Right-Click Context Menu**: Right-clicking any preset button opens an isolated menu:
-    - **Edit**: Inline HH:MM:SS scroller to edit duration and sign.
-    - **Change to Opposite Sign**: Flips `+` $\leftrightarrow$ `-` instantly.
-    - **Remove**: Deletes that preset button.
-    - **Add a Custom Box**: Adds/creates a custom preset.
+    - **⭐ Set as Default Interval**: Sets the preset duration as your default starting reminder interval.
+    - **◀ Move Left / ▶ Move Right**: Reorders preset buttons dynamically in the grid.
+    - **🏷 Activity Tag Submenu**: Assigns focus tags (`☕ Break`, `🧘 Stretch`, `⚡ Sprint`, `🎯 Deep Work`, or clear tag) displayed with emoji prefixes on the preset buttons.
+    - **✏️ Edit Duration**: Inline HH:MM:SS scroller to edit duration and sign.
+    - **± Change Sign**: Flips `+` $\leftrightarrow$ `-` instantly.
+    - **🗑 Remove**: Deletes that preset button.
+    - **➕ Add New Preset**: Adds/creates a custom preset.
   - **1 Custom Button (`✎ Custom`)**: Switches inline to custom mode with a `+ Add to Countdown` / `- Subtract from Countdown` toggle and full scroller controls.
 - **Interactive Time Scroller (`HH : MM : SS`)**:
   - Independent segment boxes for **HH** (`00`–`99`, clamped), **MM** (`00`–`59`, wrap), and **SS** (`00`–`59`, wrap).
@@ -163,5 +180,10 @@ The resulting single-file executable is created in `dist/GitVLMPC.exe`. It can b
 - Color coding for watched, in-progress, and unwatched lectures.
 - Fast filename search and filtering.
 - Bulk selection mode (select all, unselect all, mark watched/unwatched in bulk).
-- Right-click actions to mark watched, set covered time, or set to current player position.
+- **Lecture Row Right-Click Menu**:
+  - **Set Reminder to Duration**: Sets the live countdown timer to the exact duration of the lecture.
+  - **Start Study Session for this Lecture**: Starts or focuses a study session specifically on the selected lecture.
+  - **Show in File Explorer**: Opens Windows File Explorer with the lecture video file highlighted.
+  - **Copy**: Copy Lecture Title or Copy Full File Path directly to clipboard.
+  - **Mark watched / unwatched**, **Set covered time**, or **Set to current player position**.
 - Portable JSON export and import for progress, notes, and study sessions.

@@ -1,5 +1,5 @@
 import base64, json, math, os, re, shutil, socket, subprocess, threading, time, tkinter as tk
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from urllib.request import Request, urlopen
@@ -929,6 +929,10 @@ class App:
         self.timer_badge.pack(side="left",padx=(6,8))
         self.timer_label=tk.Label(self.timer_badge,textvariable=self.timer_text,font=("Consolas",13,"bold"))
         self.timer_label.pack()
+        self.timer_badge.bind("<Button-3>", self._show_stopwatch_context_menu)
+        self.timer_badge.bind("<Button-2>", self._show_stopwatch_context_menu)
+        self.timer_label.bind("<Button-3>", self._show_stopwatch_context_menu)
+        self.timer_label.bind("<Button-2>", self._show_stopwatch_context_menu)
 
         self.start_session_button=ttk.Button(row1,text="Start Session",command=self.start_session)
         self.start_session_button.pack(side="left")
@@ -937,6 +941,7 @@ class App:
         self.stop_session_button=ttk.Button(row1,text="End",command=self.stop_session,state="disabled")
         self.stop_session_button.pack(side="left",padx=(0,6))
         self.auto_start=tk.BooleanVar(value=self.auto_start_value)
+        self.auto_pause_on_video = tk.BooleanVar(value=getattr(self, "auto_pause_on_video_value", False))
         ttk.Checkbutton(row1,text="Auto-start",variable=self.auto_start,command=self.save_auto_start).pack(side="left",padx=4)
         ttk.Button(row1,text="History",command=self.show_sessions).pack(side="left",padx=4)
 
@@ -1135,6 +1140,7 @@ class App:
         PRIORITY_PLAYER = str(settings.get("priority_player", DEFAULT_PRIORITY_PLAYER)).lower()
         if PRIORITY_PLAYER not in {"mpc", "vlc"}: PRIORITY_PLAYER = DEFAULT_PRIORITY_PLAYER
         self.auto_start_value = bool(settings.get("auto_start", True))
+        self.auto_pause_on_video_value = bool(settings.get("auto_pause_on_video", False))
         self.load_focus_sound_settings()
 
     def save_player_settings(self, mode, priority, mpc_p, vlc_p, vlc_pass):
@@ -1224,9 +1230,13 @@ class App:
             for p in raw_presets[:4]:
                 if isinstance(p, dict) and "seconds" in p:
                     sign = "-" if str(p.get("sign", "+")).strip() in {"-", "−"} else "+"
+                    tag = p.get("tag")
                     try:
                         sec = max(1, int(p.get("seconds", 900)))
-                        presets.append({"sign": sign, "seconds": sec})
+                        item = {"sign": sign, "seconds": sec}
+                        if tag:
+                            item["tag"] = str(tag)
+                        presets.append(item)
                     except (ValueError, TypeError):
                         pass
             self._timer_presets = presets if presets else list(default_presets)
@@ -1386,6 +1396,89 @@ class App:
 
         menu.add_command(label="➕ Quick Add Time...", command=self._open_quick_add_panel)
         menu.add_command(label="✏️ Direct Edit Timer...", command=self._open_direct_edit_panel)
+        menu.add_command(label="⏰ Remind at Clock Time...", command=self._open_wall_clock_panel)
+
+        # Match Video Remaining Time
+        info = getattr(self, "current_info", None) or poll_player()
+        if info and info.get("dur", 0) > 0:
+            rem_vid = max(0, int(info["dur"] - info.get("pos", 0)))
+            rh, rr = divmod(rem_vid, 3600); rm, rs = divmod(rr, 60)
+            vid_label = f"🎬 Match Video Remaining ({rh:02d}:{rm:02d}:{rs:02d})"
+            menu.add_command(label=vid_label, command=lambda s=rem_vid: self._set_live_countdown_direct(s))
+        else:
+            menu.add_command(label="🎬 Match Video Remaining (No active video)", state="disabled")
+
+        menu.add_separator()
+
+        # Binaural Focus Modes submenu
+        binaural_menu = tk.Menu(menu, tearoff=0, bg="#161b22", fg="#e6edf3",
+                                activebackground="#1f6feb", activeforeground="#ffffff")
+        binaural_presets = [
+            ("Theta (4 Hz) — Deep Focus (200 / 204 Hz)", 200, 204),
+            ("Alpha (10 Hz) — Flow State (200 / 210 Hz)", 200, 210),
+            ("Beta (18 Hz) — Active Problem Solving (200 / 218 Hz)", 200, 218),
+            ("Delta (2 Hz) — Deep Relaxation (200 / 202 Hz)", 200, 202),
+            ("Gamma (40 Hz) — Peak Cognition (200 / 240 Hz)", 200, 240),
+        ]
+        cur_l = str(self.freq_l.get()).strip()
+        cur_r = str(self.freq_r.get()).strip()
+        is_sine = self.sound_mode.get() == "sine"
+        for label, fl, fr in binaural_presets:
+            prefix = "✓ " if (is_sine and cur_l == str(fl) and cur_r == str(fr)) else "   "
+            binaural_menu.add_command(
+                label=prefix + label,
+                command=lambda l=fl, r=fr: self._set_binaural_preset(l, r)
+            )
+        menu.add_cascade(label="🧠 Binaural Focus Modes", menu=binaural_menu)
+
+        # Standard Study Intervals submenu
+        standards_menu = tk.Menu(menu, tearoff=0, bg="#161b22", fg="#e6edf3",
+                                 activebackground="#1f6feb", activeforeground="#ffffff")
+        intervals = [
+            ("🍅 Pomodoro (25 min)", 1500),
+            ("⏱ Standard (45 min)", 2700),
+            ("🎯 Deep Work (60 min)", 3600),
+            ("⚡ Ultradian Sprint (90 min)", 5400),
+            ("☕ Quick Break (5 min)", 300),
+            ("🚶 Long Break (15 min)", 900),
+        ]
+        for label, s in intervals:
+            standards_menu.add_command(
+                label=label,
+                command=lambda sec=s: self._set_live_countdown_direct(sec)
+            )
+        menu.add_cascade(label="📅 Standard Study Intervals", menu=standards_menu)
+
+        # Quick Volume Submenu
+        vol_menu = tk.Menu(menu, tearoff=0, bg="#161b22", fg="#e6edf3",
+                           activebackground="#1f6feb", activeforeground="#ffffff")
+        cur_vol_pct = int(round(self.sound_vol.get() * 100))
+        for pct in (100, 80, 60, 40, 20, 0):
+            lbl_vol = f"{pct}%" if pct > 0 else "0% (Mute)"
+            prefix = "✓ " if abs(cur_vol_pct - pct) <= 5 else "   "
+            vol_menu.add_command(
+                label=prefix + lbl_vol,
+                command=lambda v=pct/100.0: self._quick_set_volume(v)
+            )
+        menu.add_cascade(label="🔊 Volume Level", menu=vol_menu)
+
+        # Chime Behavior Mode
+        chime_menu = tk.Menu(menu, tearoff=0, bg="#161b22", fg="#e6edf3",
+                             activebackground="#1f6feb", activeforeground="#ffffff")
+        chime_modes = [
+            ("🔔 Single Chime (3 sec)", "once"),
+            ("🔁 Continuous (until stopped)", "loop"),
+            ("🔕 Silent Visual Flash Only", "silent"),
+        ]
+        cur_chime = self.data.get("_settings", {}).get("focus_sound", {}).get("chime_mode", "once")
+        for label, mode_key in chime_modes:
+            prefix = "✓ " if cur_chime == mode_key else "   "
+            chime_menu.add_command(
+                label=prefix + label,
+                command=lambda m=mode_key: self._set_chime_mode(m)
+            )
+        menu.add_cascade(label="🔔 Chime Behavior", menu=chime_menu)
+
         menu.add_separator()
 
         # Preset sub-menu or direct deltas
@@ -1415,6 +1508,125 @@ class App:
             menu.add_command(label="▶ Play Test Sound", command=self._play_test)
 
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _set_binaural_preset(self, fl, fr):
+        """Set Left/Right binaural beat frequencies and activate sine mode."""
+        self.sound_mode.set("sine")
+        self.freq_l.set(str(fl))
+        self.freq_r.set(str(fr))
+        self._on_sound_mode_change()
+        self.save_focus_sound_settings()
+
+    def _quick_set_volume(self, v):
+        """Quickly adjust focus sound volume from context menu."""
+        self.sound_vol.set(v)
+        self.sound_engine.set_volume(v)
+        self.save_focus_sound_settings()
+
+    def _set_chime_mode(self, mode_key):
+        """Configure chime behavior: once, loop, or silent."""
+        fs = self.data.setdefault("_settings", {}).setdefault("focus_sound", {})
+        fs["chime_mode"] = mode_key
+        save(self.data)
+
+    def _open_wall_clock_panel(self):
+        """Open inline panel on right side to set a reminder at a specific wall-clock time."""
+        self._countdown_click_job = None
+        if self._quick_panel:
+            self._close_quick_panel()
+
+        x, y = self._get_panel_xy()
+        panel = tk.Frame(self.root, relief="solid", bd=1, bg="#0d1117",
+                         highlightbackground="#30363d", highlightthickness=1,
+                         padx=8, pady=8)
+        panel.place(x=x, y=y)
+        self._quick_panel = panel
+        self._setup_outside_dismiss(panel)
+
+        header = tk.Label(panel, text="Remind at Clock Time",
+                          font=("Segoe UI", 9, "bold"), bg="#0d1117", fg="#38bdf8")
+        header.pack(anchor="w", pady=(0, 4))
+
+        now = datetime.now()
+        target_default = now + timedelta(minutes=45)
+        h_var = tk.StringVar(value=f"{target_default.hour:02d}")
+        m_var = tk.StringVar(value=f"{target_default.minute:02d}")
+
+        countdown_preview = tk.Label(panel, text="Countdown: +45m 00s",
+                                     font=("Segoe UI", 8), bg="#0d1117", fg="#58a6ff")
+
+        def _calc_delta():
+            try:
+                th = int(h_var.get()) % 24
+                tm = int(m_var.get()) % 60
+            except Exception:
+                th, tm = now.hour, now.minute
+            cur_now = datetime.now()
+            target_dt = cur_now.replace(hour=th, minute=tm, second=0, microsecond=0)
+            if target_dt <= cur_now:
+                target_dt += timedelta(days=1)
+            diff_s = max(1, int((target_dt - cur_now).total_seconds()))
+            dh, drem = divmod(diff_s, 3600)
+            dm, ds = divmod(drem, 60)
+            countdown_preview.configure(text=f"Countdown: +{dh:02d}h {dm:02d}m {ds:02d}s")
+            return diff_s
+
+        def _step_h(delta):
+            try: cur = int(h_var.get())
+            except Exception: cur = 0
+            new_v = (cur + delta) % 24
+            h_var.set(f"{new_v:02d}")
+            _calc_delta()
+
+        def _step_m(delta):
+            try: cur = int(m_var.get())
+            except Exception: cur = 0
+            new_v = (cur + delta) % 60
+            m_var.set(f"{new_v:02d}")
+            _calc_delta()
+
+        digits_row = tk.Frame(panel, bg="#0d1117")
+        digits_row.pack(pady=4)
+
+        # HH Box (0-23)
+        hh_box = tk.Entry(digits_row, textvariable=h_var, width=3,
+                          font=("Consolas", 12, "bold"), justify="center",
+                          bg="#161b22", fg="#38bdf8", insertbackground="#38bdf8",
+                          relief="solid", bd=1)
+        hh_box.pack(side="left", padx=2)
+        hh_box.bind("<MouseWheel>", lambda e: (_step_h(1 if getattr(e, "delta", 0) > 0 else -1), "break")[1])
+        hh_box.bind("<Up>", lambda e: (_step_h(1), "break")[1])
+        hh_box.bind("<Down>", lambda e: (_step_h(-1), "break")[1])
+        hh_box.bind("<Enter>", lambda e: hh_box.focus_set())
+        hh_box.bind("<FocusOut>", lambda e: _calc_delta())
+
+        tk.Label(digits_row, text=":", font=("Consolas", 12, "bold"),
+                 bg="#0d1117", fg="#94a3b8").pack(side="left")
+
+        # MM Box (0-59)
+        mm_box = tk.Entry(digits_row, textvariable=m_var, width=3,
+                          font=("Consolas", 12, "bold"), justify="center",
+                          bg="#161b22", fg="#38bdf8", insertbackground="#38bdf8",
+                          relief="solid", bd=1)
+        mm_box.pack(side="left", padx=2)
+        mm_box.bind("<MouseWheel>", lambda e: (_step_m(1 if getattr(e, "delta", 0) > 0 else -1), "break")[1])
+        mm_box.bind("<Up>", lambda e: (_step_m(1), "break")[1])
+        mm_box.bind("<Down>", lambda e: (_step_m(-1), "break")[1])
+        mm_box.bind("<Enter>", lambda e: mm_box.focus_set())
+        mm_box.bind("<FocusOut>", lambda e: _calc_delta())
+
+        countdown_preview.pack(fill="x", pady=2)
+        _calc_delta()
+
+        btn_row = tk.Frame(panel, bg="#0d1117")
+        btn_row.pack(fill="x", pady=(4, 0))
+
+        def _set_clock_alarm():
+            diff_s = _calc_delta()
+            self._set_live_countdown_direct(diff_s)
+
+        ttk.Button(btn_row, text="Set Alarm", command=_set_clock_alarm).pack(side="left", padx=2)
+        ttk.Button(btn_row, text="Cancel", command=self._close_quick_panel).pack(side="left", padx=2)
 
     def _reset_live_countdown(self):
         """Reset elapsed counter so countdown restarts from its full configured value."""
@@ -1534,7 +1746,9 @@ class App:
         sec = max(0, int(preset.get("seconds", 0)))
         h, rem = divmod(sec, 3600)
         m, s = divmod(rem, 60)
-        return f"{sign}{h:02d}:{m:02d}:{s:02d}"
+        tag = preset.get("tag")
+        prefix = f"{tag} " if tag else ""
+        return f"{prefix}{sign}{h:02d}:{m:02d}:{s:02d}"
 
     def _build_hms_scroller(self, parent, initial_seconds=0):
         """Creates an inline HH:MM:SS scroller frame with mousewheel support.
@@ -1677,7 +1891,7 @@ class App:
         for i, p in enumerate(presets[:4]):
             r, c = divmod(i, 2)
             lbl_text = self._format_preset_label(p)
-            btn = ttk.Button(grid_frame, text=lbl_text, width=11)
+            btn = ttk.Button(grid_frame, text=lbl_text, width=13)
             btn.grid(row=r, column=c, padx=3, pady=3, sticky="ew")
 
             delta = p["seconds"] if p.get("sign", "+") != "-" else -p["seconds"]
@@ -1688,7 +1902,7 @@ class App:
             btn.bind("<Button-2>", lambda e, idx=i: self._show_preset_context_menu(e, idx))
 
         if len(presets) < 4:
-            add_slot = ttk.Button(grid_frame, text="＋ Add Preset", width=11,
+            add_slot = ttk.Button(grid_frame, text="＋ Add Preset", width=13,
                                   command=lambda: self._render_add_custom_box_view())
             r, c = divmod(len(presets), 2)
             add_slot.grid(row=r, column=c, padx=3, pady=3, sticky="ew")
@@ -1707,15 +1921,72 @@ class App:
         menu = tk.Menu(self.root, tearoff=0, bg="#161b22", fg="#e6edf3",
                        activebackground="#1f6feb", activeforeground="#ffffff",
                        relief="solid", bd=1)
-        menu.add_command(label="Edit",
+        menu.add_command(label="⭐ Set as Default Interval",
+                         command=lambda: self._set_preset_as_default(index))
+
+        # Move reordering
+        if index > 0:
+            menu.add_command(label="◀ Move Left",
+                             command=lambda: self._move_preset(index, -1))
+        if index < len(self._timer_presets) - 1:
+            menu.add_command(label="▶ Move Right",
+                             command=lambda: self._move_preset(index, 1))
+
+        # Activity Tag submenu
+        tag_menu = tk.Menu(menu, tearoff=0, bg="#161b22", fg="#e6edf3",
+                           activebackground="#1f6feb", activeforeground="#ffffff")
+        cur_tag = self._timer_presets[index].get("tag", "")
+        tags = [
+            ("☕ Break", "☕"),
+            ("🧘 Stretch", "🧘"),
+            ("⚡ Sprint", "⚡"),
+            ("🎯 Deep Work", "🎯"),
+            ("None (Clear Tag)", None),
+        ]
+        for label, tag_val in tags:
+            prefix = "✓ " if cur_tag == (tag_val or "") else "   "
+            tag_menu.add_command(
+                label=prefix + label,
+                command=lambda t=tag_val: self._set_preset_tag(index, t)
+            )
+        menu.add_cascade(label="🏷 Activity Tag", menu=tag_menu)
+
+        menu.add_separator()
+        menu.add_command(label="✏️ Edit Duration...",
                          command=lambda: self._render_edit_preset_view(index))
-        menu.add_command(label="Change to Opposite Sign",
+        menu.add_command(label="± Change Sign (+ / -)",
                          command=lambda: self._toggle_preset_sign(index))
-        menu.add_command(label="Remove",
+        menu.add_command(label="🗑 Remove Preset",
                          command=lambda: self._remove_preset(index))
-        menu.add_command(label="Add a Custom Box",
+        menu.add_command(label="➕ Add New Preset...",
                          command=lambda: self._render_add_custom_box_view(replace_index=index))
         menu.tk_popup(event.x_root, event.y_root)
+
+    def _set_preset_as_default(self, index):
+        """Set this preset's duration as the default starting reminder interval."""
+        if 0 <= index < len(self._timer_presets):
+            sec = self._timer_presets[index].get("seconds", 2700)
+            self._set_live_countdown_direct(sec)
+
+    def _move_preset(self, index, direction):
+        """Move preset left (-1) or right (+1) in the list."""
+        new_idx = index + direction
+        if 0 <= index < len(self._timer_presets) and 0 <= new_idx < len(self._timer_presets):
+            self._timer_presets[index], self._timer_presets[new_idx] = (
+                self._timer_presets[new_idx], self._timer_presets[index]
+            )
+            self.save_focus_sound_settings()
+            self._render_presets_view()
+
+    def _set_preset_tag(self, index, tag):
+        """Set or remove activity tag on preset button."""
+        if 0 <= index < len(self._timer_presets):
+            if tag:
+                self._timer_presets[index]["tag"] = tag
+            else:
+                self._timer_presets[index].pop("tag", None)
+            self.save_focus_sound_settings()
+            self._render_presets_view()
 
     def _toggle_preset_sign(self, index):
         """Toggle the sign (+ <-> -) of the specified preset."""
@@ -1989,34 +2260,50 @@ class App:
 
     def _fire_reminder(self):
         """Called when the study reminder countdown reaches zero."""
-        # Stop any test sound first; don't play if already playing from session
-        FocusSoundEngine._check_libs()
-        mode = self.sound_mode.get()
-        if mode == "sine" and not FocusSoundEngine._sd_ok:
-            messagebox.showinfo("Missing libraries",
-                                FocusSoundEngine.missing_libs_message("sine"), parent=self.root)
-            return
-        if mode == "mp3" and not FocusSoundEngine._pg_ok:
-            messagebox.showinfo("Missing libraries",
-                                FocusSoundEngine.missing_libs_message("mp3"), parent=self.root)
-            return
-        self.sound_engine.stop()
-        self.sound_engine.play(duration_s=5)
-        self._show_reminder_toast()
+        chime_mode = self.data.get("_settings", {}).get("focus_sound", {}).get("chime_mode", "once")
+        if chime_mode != "silent":
+            FocusSoundEngine._check_libs()
+            mode = self.sound_mode.get()
+            if mode == "sine" and not FocusSoundEngine._sd_ok:
+                messagebox.showinfo("Missing libraries",
+                                    FocusSoundEngine.missing_libs_message("sine"), parent=self.root)
+                return
+            if mode == "mp3" and not FocusSoundEngine._pg_ok:
+                messagebox.showinfo("Missing libraries",
+                                    FocusSoundEngine.missing_libs_message("mp3"), parent=self.root)
+                return
+            self.sound_engine.stop()
+            if chime_mode == "loop":
+                self.sound_engine.play()  # plays until stopped
+            else:
+                self.sound_engine.play(duration_s=3)
+        self._show_reminder_toast(is_loop=(chime_mode == "loop"))
 
-    def _show_reminder_toast(self):
-        """Briefly flash a reminder banner centred on the app window."""
+    def _show_reminder_toast(self, is_loop=False):
+        """Flash a reminder banner centred on the app window with click-to-dismiss."""
         try:
             toast = tk.Toplevel(self.root)
             toast.overrideredirect(True)
             toast.attributes("-topmost", True)
             rx = self.root.winfo_x() + self.root.winfo_width() // 2
             ry = self.root.winfo_y() + self.root.winfo_height() // 2
-            toast.geometry(f"320x54+{rx - 160}+{ry - 27}")
-            tk.Label(toast, text="🔔  Study Reminder — consider a short break!",
-                     font=("Segoe UI", 11), padx=12, pady=12,
-                     bg="#1e293b", fg="#38bdf8").pack(fill="both", expand=True)
-            toast.after(4000, toast.destroy)
+            toast.geometry(f"340x58+{rx - 170}+{ry - 29}")
+            sub_text = "Click to stop chime & dismiss" if is_loop else "Click to dismiss"
+            lbl = tk.Label(toast, text=f"🔔  Study Reminder — time for a break!\n({sub_text})",
+                           font=("Segoe UI", 10, "bold"), padx=12, pady=8,
+                           bg="#1e293b", fg="#38bdf8", cursor="hand2")
+            lbl.pack(fill="both", expand=True)
+
+            def _dismiss(e=None):
+                self.sound_engine.stop()
+                try: toast.destroy()
+                except Exception: pass
+
+            lbl.bind("<Button-1>", _dismiss)
+            toast.bind("<Button-1>", _dismiss)
+
+            if not is_loop:
+                toast.after(4000, toast.destroy)
         except Exception:
             pass
 
@@ -2651,6 +2938,30 @@ class App:
         m.add_command(label="Set all selected to current player position" if bulk else "Set to current player position",command=lambda: self.context_set_current(p))
         m.add_command(label="Set rating and review for all selected..." if bulk else "Set rating and review...",command=lambda: self.context_rating_review(p))
         m.add_separator()
+
+        # Lecture row actions
+        if not bulk:
+            rec = self.data.get(str(p.resolve()), {})
+            dur = int(rec.get("duration", 0))
+            if dur > 0:
+                m.add_command(label=f"🔔 Set Reminder to Duration ({fmt(dur)})",
+                              command=lambda: self._set_reminder_to_lecture_duration(p))
+            m.add_command(label="▶ Start Study Session for this Lecture",
+                          command=lambda: self._start_session_for_lecture(p))
+            m.add_command(label="📂 Show in File Explorer",
+                          command=lambda: self._open_in_explorer(p))
+            copy_menu = tk.Menu(m, tearoff=0, bg=t["card_bg"], fg=t["fg"],
+                                activebackground=t["accent"], activeforeground=t["accent_text"])
+            copy_menu.add_command(label="Lecture Title", command=lambda: self._copy_to_clipboard(p.name))
+            copy_menu.add_command(label="File Path", command=lambda: self._copy_to_clipboard(str(p.resolve())))
+            m.add_cascade(label="📋 Copy", menu=copy_menu)
+        else:
+            m.add_command(label="📂 Show in File Explorer",
+                          command=lambda: self._open_in_explorer(p))
+            m.add_command(label="📋 Copy Selected Titles",
+                          command=lambda: self._copy_to_clipboard("\n".join(x.name for x in self.selected_paths())))
+
+        m.add_separator()
         if self.select_mode and str(p.resolve()) in self.checked:
             m.add_command(label="Remove all selected",command=lambda: self.remove_selected())
         else:
@@ -2659,6 +2970,58 @@ class App:
             m.tk_popup(e.x_root,e.y_root)
         finally:
             m.grab_release()
+
+    def _set_reminder_to_lecture_duration(self, p):
+        """Set reminder countdown to the duration of this lecture."""
+        rec = self.data.get(str(p.resolve()), {})
+        dur = int(rec.get("duration", 0))
+        if dur > 0:
+            self._set_live_countdown_direct(dur)
+        else:
+            messagebox.showinfo("Duration unavailable",
+                                "This lecture does not have duration information yet.",
+                                parent=self.root)
+
+    def _start_session_for_lecture(self, p):
+        """Start or focus study session on this specific lecture."""
+        if not self.session:
+            self.start_session()
+        elif self.session.get("status") == "paused":
+            self.start_session()
+        now = time.monotonic()
+        key = str(p.resolve())
+        if self.active_segment:
+            self.finish_segment()
+        self.active_segment = {
+            "lecture": p.name,
+            "path": key,
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "session_elapsed": 0,
+            "video_elapsed": 0,
+            "last_tick": now
+        }
+        self.timer_lecture_full = p.name
+        self.timer_lecture.set(self._truncate_lecture(p.name))
+        self.update_session_display()
+
+    def _open_in_explorer(self, p):
+        """Reveal file in File Explorer."""
+        try:
+            target = str(p.resolve())
+            if os.name == "nt":
+                subprocess.Popen(["explorer.exe", f"/select,{target}"])
+            else:
+                subprocess.Popen(["open", "-R", target])
+        except Exception as err:
+            messagebox.showerror("Error", f"Could not reveal file: {err}", parent=self.root)
+
+    def _copy_to_clipboard(self, text):
+        """Copy text to clipboard."""
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        except Exception:
+            pass
 
     def enable_select(self,p=None):
         self.select_mode=True
@@ -2855,6 +3218,91 @@ class App:
             duration=session.get("total",session.get("total_session_time",0))
             tree.insert("","end",values=(session.get("id",""),started[:10],started[11:19],str(session.get("ended_at",""))[11:19],lectures,fmt(duration)))
         tree.pack(fill="both",expand=True,padx=10,pady=10)
+
+    def _show_stopwatch_context_menu(self, event):
+        """Right-click on stopwatch time badge: session adjustment & controls."""
+        menu = tk.Menu(self.root, tearoff=0, bg="#161b22", fg="#e6edf3",
+                       activebackground="#1f6feb", activeforeground="#ffffff",
+                       relief="solid", bd=1)
+
+        has_session = bool(self.session)
+        is_active = bool(self.session and self.session.get("status") == "active")
+
+        # Session adjustments (+15m, +5m, +1m, -1m, -5m, -15m)
+        adjust_menu = tk.Menu(menu, tearoff=0, bg="#161b22", fg="#e6edf3",
+                              activebackground="#1f6feb", activeforeground="#ffffff")
+        deltas = [
+            ("+15 min", 900),
+            ("+5 min", 300),
+            ("+1 min", 60),
+            ("-1 min", -60),
+            ("-5 min", -300),
+            ("-15 min", -900),
+        ]
+        for lbl, d in deltas:
+            adjust_menu.add_command(
+                label=lbl,
+                command=lambda delta=d: self._adjust_session_time(delta),
+                state="normal" if has_session else "disabled"
+            )
+        menu.add_cascade(label="⏱ Adjust Session Time", menu=adjust_menu)
+
+        # Quick session controls
+        if not has_session:
+            menu.add_command(label="▶ Start Study Session", command=self.start_session)
+        elif is_active:
+            menu.add_command(label="⏸ Pause Session", command=self.pause_session)
+            menu.add_command(label="⏹ End Session", command=self.stop_session)
+        else:
+            menu.add_command(label="▶ Resume Session", command=self.start_session)
+            menu.add_command(label="⏹ End Session", command=self.stop_session)
+
+        menu.add_separator()
+
+        # Toggle Auto-pause with video
+        auto_pause = self.auto_pause_on_video.get()
+        prefix = "✓ " if auto_pause else "   "
+        menu.add_command(
+            label=f"{prefix}Auto-pause when Video Pauses",
+            command=self._toggle_auto_pause_video
+        )
+
+        # Copy Session Duration
+        menu.add_command(
+            label="📋 Copy Session Duration",
+            command=self._copy_session_duration
+        )
+
+        # View History
+        menu.add_command(label="📜 Study Session History...", command=self.show_sessions)
+
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _adjust_session_time(self, delta_s):
+        """Add or subtract seconds from the current session's elapsed time."""
+        if not self.session:
+            return
+        cur_total = float(self.session.get("total", 0))
+        new_total = max(0.0, cur_total + delta_s)
+        self.session["total"] = new_total
+        if self.active_segment:
+            cur_seg = float(self.active_segment.get("session_elapsed", 0))
+            self.active_segment["session_elapsed"] = max(0.0, cur_seg + delta_s)
+        save(self.data)
+        self.update_session_display()
+
+    def _toggle_auto_pause_video(self):
+        """Toggle auto-pause session on media player pause."""
+        cur = self.auto_pause_on_video.get()
+        self.auto_pause_on_video.set(not cur)
+        self.data.setdefault("_settings", {})["auto_pause_on_video"] = self.auto_pause_on_video.get()
+        save(self.data)
+
+    def _copy_session_duration(self):
+        """Copy current session duration to clipboard."""
+        cur = self.timer_text.get()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(cur)
 
     def edit_rating(self,p,event=None):
         record=self.data[str(p.resolve())]
@@ -3189,6 +3637,14 @@ class App:
         elif not self.session and self.auto_start.get() and self.is_playing(info) and lecture and self.auto_block_path != info.get("path"):
             self.start_session()
             needs_redraw = True
+
+        if self.auto_pause_on_video.get() and self.session:
+            if self.session.get("status") == "active" and not self.is_playing(info):
+                self.pause_session()
+                needs_redraw = True
+            elif self.session.get("status") == "paused" and self.is_playing(info):
+                self.start_session()
+                needs_redraw = True
 
         self.track_activity(info, lecture)
         if lecture and self.session and self.session["status"] == "active":
