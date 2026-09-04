@@ -127,7 +127,11 @@ class App:
         ttk.Label(activity_top,textvariable=self.video_total_text).pack(side="left")
         self.activity_filter="all"
         ttk.Button(activity_top,text="Current Session",command=self.show_current_activity).pack(side="right")
-        ttk.Button(activity_top,text="Other Session",command=self.choose_activity_session).pack(side="right",padx=6)
+        self.other_session_button=tk.Menubutton(activity_top,text="Other Session",relief="raised")
+        self.other_session_menu=tk.Menu(self.other_session_button,tearoff=0)
+        self.other_session_button.configure(menu=self.other_session_menu)
+        self.other_session_menu.configure(postcommand=self.refresh_activity_menu)
+        self.other_session_button.pack(side="right",padx=6)
         ttk.Button(activity_top,text="Show All",command=self.show_all_activity).pack(side="right",padx=6)
         ttk.Button(activity_top,text="Add manual segment",command=self.add_manual_segment).pack(side="right")
         self.hide_activity_button=ttk.Button(activity_top,text="Hide Activity",command=self.hide_activity)
@@ -135,8 +139,9 @@ class App:
         activity_body=ttk.Frame(self.activity_frame); activity_body.pack(fill="x",pady=(6,0))
         activity_cols=("session_name","lecture","started","session","video")
         self.activity_tree=ttk.Treeview(activity_body,columns=activity_cols,show="headings",height=4)
+        self.activity_sort_column="started"; self.activity_sort_reverse=True
         for c,t,w in zip(activity_cols,("Session Name","Lecture","Start date + time","Session time","Video playing time"),(110,330,180,130,150)):
-            self.activity_tree.heading(c,text=t); self.activity_tree.column(c,width=w,anchor="w" if c in ("lecture","started") else "center")
+            self.activity_tree.heading(c,text=t,command=lambda column=c:self.sort_activity(column)); self.activity_tree.column(c,width=w,anchor="w" if c in ("lecture","started") else "center")
         activity_scroll=ttk.Scrollbar(activity_body,orient="vertical",command=self.activity_tree.yview)
         self.activity_tree.configure(yscrollcommand=activity_scroll.set); self.activity_tree.pack(side="left",fill="x",expand=True); activity_scroll.pack(side="right",fill="y")
         self.show_activity_button=ttk.Button(self.root,text="Show Activity",command=self.show_activity)
@@ -278,18 +283,47 @@ class App:
 
     def draw_activity(self):
         self.activity_tree.delete(*self.activity_tree.get_children())
-        sessions=list(self.data.get("_sessions",[]))
+        sessions=[]
+        grouped_keys=set()
+        for study_session in self.data.get("_study_sessions",[]):
+            if not isinstance(study_session,dict):continue
+            session_name=study_session.get("id", "Unknown")
+            for segment in study_session.get("segments",[]):
+                if not isinstance(segment,dict):continue
+                item=dict(segment); item["session_name"]=session_name
+                grouped_keys.add((item.get("lecture"),item.get("started_at")))
+                sessions.append(item)
+        for segment in self.data.get("_sessions",[]):
+            if not isinstance(segment,dict):continue
+            key=(segment.get("lecture"),segment.get("started_at"))
+            if key not in grouped_keys:
+                item=dict(segment); item["session_name"]=item.get("session_name") or "Legacy activity"
+                sessions.append(item)
         if self.active_segment:
             sessions.append({"session_name":self.session.get("id","") if self.session else "","lecture":self.active_segment["lecture"],"started_at":self.active_segment["started_at"],"session_duration":self.active_segment["session_elapsed"],"video_play_duration":self.active_segment["video_elapsed"]})
         if self.activity_filter!="all":
             sessions=[s for s in sessions if isinstance(s,dict) and s.get("session_name")==self.activity_filter]
+        sort_column={"session_name":"session_name","lecture":"lecture","started":"started_at"}.get(self.activity_sort_column)
+        if sort_column:
+            sessions.sort(key=lambda s:str(s.get(sort_column," ")).lower(),reverse=self.activity_sort_reverse)
+        elif self.activity_sort_column=="session":
+            sessions.sort(key=lambda s:float(s.get("session_duration",s.get("duration",0)) or 0),reverse=self.activity_sort_reverse)
+        else:
+            sessions.sort(key=lambda s:float(s.get("video_play_duration",s.get("duration",0)) or 0),reverse=self.activity_sort_reverse)
         session_total=sum(float(s.get("session_duration",s.get("duration",0)) or 0) for s in sessions if isinstance(s,dict))
         video_total=sum(float(s.get("video_play_duration",s.get("duration",0)) or 0) for s in sessions if isinstance(s,dict))
         self.session_total_text.set("Session total: "+fmt(session_total)); self.video_total_text.set("Video playing total: "+fmt(video_total))
-        for segment in reversed(sessions):
+        for segment in sessions:
             if not isinstance(segment,dict):continue
             started=str(segment.get("started_at", ""))
             self.activity_tree.insert("","end",values=(segment.get("session_name",""),segment.get("lecture",""),started.replace("T"," "),fmt(segment.get("session_duration",segment.get("duration",0))),fmt(segment.get("video_play_duration",segment.get("duration",0)))))
+
+    def sort_activity(self,column):
+        if self.activity_sort_column==column:
+            self.activity_sort_reverse=not self.activity_sort_reverse
+        else:
+            self.activity_sort_column=column; self.activity_sort_reverse=False
+        self.draw_activity()
 
     def show_current_activity(self):
         self.activity_filter=self.session.get("id","") if self.session else "__none__"
@@ -299,26 +333,25 @@ class App:
         self.activity_filter="all"
         self.draw_activity()
 
-    def choose_activity_session(self):
+    def refresh_activity_menu(self):
+        self.other_session_menu.delete(0,tk.END)
         sessions=[s for s in self.data.get("_study_sessions",[]) if isinstance(s,dict)]
         if self.session:
             sessions=[dict(self.session,ended_at="",_active=True)]+sessions
+        if any(isinstance(segment,dict) and not segment.get("session_name") for segment in self.data.get("_sessions",[])):
+            sessions.append({"id":"Legacy activity","started_at":"0000-00-00T00:00:00"})
         sessions.sort(key=lambda s:str(s.get("started_at", "")),reverse=True)
         if not sessions:
-            messagebox.showinfo("Other session","No saved sessions are available.",parent=self.root); return
-        window=tk.Toplevel(self.root); window.title("Choose session activity"); window.geometry("720x320"); window.transient(self.root)
-        ttk.Label(window,text="Sessions sorted newest first:").pack(anchor="w",padx=12,pady=(12,4))
-        choices=tk.Listbox(window,height=10); choices.pack(fill="both",expand=True,padx=12,pady=4)
+            self.other_session_menu.add_command(label="No saved sessions",state="disabled")
+            return
         for session in sessions:
-            started=str(session.get("started_at", "")); label=f"{session.get('id','Unknown')} | {started.replace('T',' ')}"
-            choices.insert(tk.END,label)
-        def show_selected():
-            selected=choices.curselection()
-            if not selected:return
-            self.activity_filter=sessions[selected[0]].get("id",""); self.draw_activity(); window.destroy()
-        buttons=ttk.Frame(window); buttons.pack(fill="x",padx=12,pady=12)
-        ttk.Button(buttons,text="Show Activity",command=show_selected).pack(side="left")
-        ttk.Button(buttons,text="Cancel",command=window.destroy).pack(side="right")
+            started=str(session.get("started_at", "")); session_id=session.get("id","Unknown")
+            label=f"{session_id} | {started.replace('T',' ')}"
+            self.other_session_menu.add_command(label=label,command=lambda value=session_id:self.show_activity_session(value))
+
+    def show_activity_session(self,session_id):
+        self.activity_filter=session_id
+        self.draw_activity()
 
     def hide_activity(self):
         self.activity_frame.pack_forget()
@@ -569,6 +602,7 @@ class App:
 
     def show_sessions(self):
         sessions=[s for s in self.data.get("_study_sessions",[]) if isinstance(s,dict)]
+        sessions.sort(key=lambda s:str(s.get("started_at", "")),reverse=True)
         window=tk.Toplevel(self.root); window.title("Study session history"); window.geometry("850x380"); window.transient(self.root)
         cols=("session","date","started","ended","lectures","duration"); tree=ttk.Treeview(window,columns=cols,show="headings")
         for c,t,w in zip(cols,("Session","Date","Started","Stopped","Lectures","Duration"),(110,100,150,150,100,100)):

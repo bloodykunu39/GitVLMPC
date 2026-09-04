@@ -40,6 +40,9 @@ Ratings use a 1-5 scale. The average rating excludes lectures without a rating, 
 - Saves timestamped sessions, shows per-lecture Time Spent, total Study time, and a session history.
 - Groups multiple lectures and replay segments under one dated ID such as `Session0001` until the user ends the session.
 - Shows a compact activity area with session total, actual video-playing total, and a scrollable segment list.
+- Activity can be filtered to the current session, a selected historical session, or all sessions; historical sessions are sorted newest first.
+- The **Other Session** control opens an inline dropdown with each session ID and creation date; selecting one filters activity immediately.
+- Activity rows include the grouped session name and date/time.
 - Shows a scrollable activity table with separate session time and actual video-playing time for every segment.
 - Supports manually added segments and hiding/showing the activity panel without stopping tracking.
 - Detects the current lecture directly from MPC-BE, so starting a session never requires selecting a table row.
