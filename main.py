@@ -338,6 +338,176 @@ def registry_history():
     for r,k in roots: walk(r,k)
     return list(dict.fromkeys(out))
 
+class FocusSoundEngine:
+    """
+    Plays a binaural-beat sine pair (sounddevice + numpy) or an MP3 (pygame).
+    Gracefully degrades if dependencies are not installed.
+    All public methods are safe to call from any thread.
+    """
+    _libs_checked = False
+    _sd_ok = False   # sounddevice + numpy available
+    _pg_ok = False   # pygame available
+
+    @classmethod
+    def _check_libs(cls):
+        if cls._libs_checked:
+            return
+        cls._libs_checked = True
+        try:
+            import sounddevice as _sd  # noqa: F401
+            import numpy as _np  # noqa: F401
+            cls._sd_ok = True
+        except ImportError:
+            pass
+        try:
+            import pygame as _pg  # noqa: F401
+            cls._pg_ok = True
+        except ImportError:
+            pass
+
+    def __init__(self):
+        self._mode = "sine"
+        self._freq_l = 200.0
+        self._freq_r = 204.0
+        self._volume = 0.5
+        self._mp3_path = ""
+        self._stream = None        # sounddevice stream
+        self._lock = threading.Lock()
+        self._playing = False
+        self._phase_l = 0.0
+        self._phase_r = 0.0
+        self._stop_after = None    # time.monotonic() deadline, or None
+        self._pg_initialized = False
+
+    def configure(self, mode, freq_l, freq_r, mp3_path, volume):
+        was_playing = self._playing
+        self.stop()
+        with self._lock:
+            self._mode = mode
+            self._freq_l = float(freq_l)
+            self._freq_r = float(freq_r)
+            self._mp3_path = str(mp3_path)
+            self._volume = max(0.0, min(1.0, float(volume)))
+        if was_playing:
+            self.play()
+
+    def set_volume(self, v):
+        self._volume = max(0.0, min(1.0, float(v)))
+        if self._playing:
+            if self._mode == "mp3" and self._pg_initialized:
+                try:
+                    import pygame
+                    pygame.mixer.music.set_volume(self._volume)
+                except Exception:
+                    pass
+
+    @property
+    def is_playing(self):
+        return self._playing
+
+    def play(self, duration_s=None):
+        """Start playback.  duration_s=None means play until stop() is called."""
+        self._check_libs()
+        with self._lock:
+            if self._playing:
+                return
+            if self._mode == "sine":
+                if not self._sd_ok:
+                    return
+                self._stop_after = time.monotonic() + duration_s if duration_s else None
+                self._phase_l = 0.0
+                self._phase_r = 0.0
+                try:
+                    import sounddevice as sd
+                    self._stream = sd.OutputStream(
+                        samplerate=44100,
+                        channels=2,
+                        dtype="float32",
+                        blocksize=1024,
+                        callback=self._sine_callback,
+                        finished_callback=self._stream_finished,
+                    )
+                    self._stream.start()
+                    self._playing = True
+                except Exception:
+                    self._stream = None
+            else:
+                # MP3 mode
+                if not self._pg_ok or not self._mp3_path or not Path(self._mp3_path).is_file():
+                    return
+                try:
+                    import pygame
+                    if not self._pg_initialized:
+                        pygame.mixer.init()
+                        self._pg_initialized = True
+                    pygame.mixer.music.load(self._mp3_path)
+                    pygame.mixer.music.set_volume(self._volume)
+                    loops = 0 if duration_s else -1
+                    pygame.mixer.music.play(loops=loops)
+                    self._playing = True
+                    if duration_s:
+                        # schedule stop via a daemon thread
+                        t = threading.Timer(duration_s, self.stop)
+                        t.daemon = True
+                        t.start()
+                except Exception:
+                    pass
+
+    def stop(self):
+        with self._lock:
+            self._playing = False
+            if self._stream:
+                try:
+                    self._stream.stop(ignore_errors=True)
+                    self._stream.close(ignore_errors=True)
+                except Exception:
+                    pass
+                self._stream = None
+            if self._pg_initialized:
+                try:
+                    import pygame
+                    pygame.mixer.music.stop()
+                except Exception:
+                    pass
+
+    def _sine_callback(self, outdata, frames, time_info, status):
+        import numpy as np
+        sr = 44100.0
+        vol = self._volume
+        # Check deadline
+        if self._stop_after is not None and time.monotonic() >= self._stop_after:
+            outdata[:] = 0
+            import sounddevice as _sd_mod
+            raise _sd_mod.CallbackStop()  # clean stop — no "Exception ignored" spam
+        t_arr = (np.arange(frames) / sr).astype(np.float32)
+        left = np.sin(2 * np.pi * self._freq_l * t_arr + self._phase_l).astype(np.float32) * vol
+        right = np.sin(2 * np.pi * self._freq_r * t_arr + self._phase_r).astype(np.float32) * vol
+        # update phase accumulators to avoid discontinuities
+        self._phase_l = (self._phase_l + 2 * np.pi * self._freq_l * frames / sr) % (2 * np.pi)
+        self._phase_r = (self._phase_r + 2 * np.pi * self._freq_r * frames / sr) % (2 * np.pi)
+        outdata[:, 0] = left
+        outdata[:, 1] = right
+
+    def _stream_finished(self):
+        with self._lock:
+            self._playing = False
+            self._stream = None
+
+    @staticmethod
+    def missing_libs_message(mode):
+        if mode == "sine":
+            return (
+                "Focus Sound (Binaural Beat) requires additional libraries.\n\n"
+                "Run this command in your terminal, then restart the app:\n\n"
+                "    pip install sounddevice numpy\n"
+            )
+        return (
+            "Focus Sound (MP3) requires pygame.\n\n"
+            "Run this command in your terminal, then restart the app:\n\n"
+            "    pip install pygame\n"
+        )
+
+
 class App:
     def __init__(self,root):
         self.root=root; self.root.title("GitVLMPC - Lecture Progress Tracker"); self.root.geometry("1120x720")
@@ -346,10 +516,13 @@ class App:
         self.current_theme = load_app_theme()
         self.data=load(); self.load_settings(); self.session=None; self.active_segment=None; self.current_info=None; self.auto_block_path=None
         self._latest_player_info = None
+        self._reminder_elapsed = 0
+        self.sound_engine = FocusSoundEngine()
         self._poller_active = True
         self._poller_thread = threading.Thread(target=self._bg_poll_loop, daemon=True)
         self._poller_thread.start()
         self.build()
+        self._apply_focus_sound_to_ui()
         self.apply_theme(self.current_theme)
         self.refresh()
         root.after(400,self.check_first_run)
@@ -734,22 +907,131 @@ class App:
         self.npb=ttk.Progressbar(n,maximum=100); ttk.Label(n,textvariable=self.now,font=("Segoe UI",11,"bold")).pack(anchor="w")
         self.npb.pack(fill="x",pady=5); ttk.Label(n,textvariable=self.nd).pack(anchor="w")
         
-        timer=ttk.LabelFrame(self.content,text="Study Stopwatch",padding=10); timer.pack(fill="x",padx=14,pady=(0,10))
-        self.timer_text=tk.StringVar(value="00:00:00"); self.timer_lecture=tk.StringVar(value="Waiting for media player activity")
-        ttk.Label(timer,textvariable=self.timer_lecture,font=("Segoe UI",10,"bold")).pack(side="left")
-        
-        self.timer_badge=tk.Frame(timer,padx=10,pady=2,relief="solid",borderwidth=1)
-        self.timer_badge.pack(side="left",padx=14)
-        self.timer_label=tk.Label(self.timer_badge,textvariable=self.timer_text,font=("Consolas",15,"bold"))
+        timer=ttk.LabelFrame(self.content,text="Study Stopwatch",padding=(10,6,10,6))
+        timer.pack(fill="x",padx=14,pady=(0,6))
+
+        # Row 1 — lecture name (truncated) + clock + session buttons
+        row1 = ttk.Frame(timer); row1.pack(fill="x")
+        self.timer_lecture_full = ""   # stores untruncated name for tooltip
+        self.timer_lecture=tk.StringVar(value="Waiting for media player activity")
+        self.timer_text=tk.StringVar(value="00:00:00")
+        self._lec_label = ttk.Label(row1, textvariable=self.timer_lecture,
+                                    font=("Segoe UI",10,"bold"), width=16, anchor="w")
+        self._lec_label.pack(side="left")
+        # tooltip on hover
+        self._tooltip_id = None
+        self._tooltip_win = None
+        self._lec_label.bind("<Enter>",  self._tooltip_schedule)
+        self._lec_label.bind("<Leave>",  self._tooltip_cancel)
+        self._lec_label.bind("<Motion>", self._tooltip_schedule)
+
+        self.timer_badge=tk.Frame(row1,padx=8,pady=2,relief="solid",borderwidth=1)
+        self.timer_badge.pack(side="left",padx=(6,8))
+        self.timer_label=tk.Label(self.timer_badge,textvariable=self.timer_text,font=("Consolas",13,"bold"))
         self.timer_label.pack()
 
-        self.start_session_button=ttk.Button(timer,text="Start Session",command=self.start_session); self.start_session_button.pack(side="left")
-        self.pause_session_button=ttk.Button(timer,text="Pause Session",command=self.pause_session,state="disabled"); self.pause_session_button.pack(side="left",padx=6)
-        self.stop_session_button=ttk.Button(timer,text="End Session",command=self.stop_session,state="disabled"); self.stop_session_button.pack(side="left")
+        self.start_session_button=ttk.Button(row1,text="Start Session",command=self.start_session)
+        self.start_session_button.pack(side="left")
+        self.pause_session_button=ttk.Button(row1,text="Pause",command=self.pause_session,state="disabled")
+        self.pause_session_button.pack(side="left",padx=4)
+        self.stop_session_button=ttk.Button(row1,text="End",command=self.stop_session,state="disabled")
+        self.stop_session_button.pack(side="left",padx=(0,6))
         self.auto_start=tk.BooleanVar(value=self.auto_start_value)
-        ttk.Checkbutton(timer,text="Auto-start when player is playing",variable=self.auto_start,command=self.save_auto_start).pack(side="left",padx=8)
-        ttk.Button(timer,text="Session History",command=self.show_sessions).pack(side="left",padx=6)
+        ttk.Checkbutton(row1,text="Auto-start",variable=self.auto_start,command=self.save_auto_start).pack(side="left",padx=4)
+        ttk.Button(row1,text="History",command=self.show_sessions).pack(side="left",padx=4)
+
+        # Row 2 — Focus Sound / Study Reminder (compact strip)
+        row2_outer = ttk.Frame(timer); row2_outer.pack(fill="x", pady=(6, 0))
+        sound_row = ttk.Frame(row2_outer); sound_row.pack(fill="x")
+
+        # Master enable checkbox
+        self.reminder_enabled = tk.BooleanVar(value=False)
+        ttk.Checkbutton(sound_row, text="🔔 Reminder:", variable=self.reminder_enabled,
+                        command=self._on_reminder_toggle).pack(side="left")
+
+        # Countdown label — single click → inline quick-add panel
+        self._countdown_var = tk.StringVar(value="--:--:--")
+        self.reminder_interval = tk.StringVar(value="2700")   # seconds
+        self._reminder_interval_entry = tk.Label(
+            sound_row, textvariable=self._countdown_var,
+            font=("Consolas", 10, "bold"), fg="#38bdf8", bg="#07070a",
+            relief="solid", bd=1, padx=6, cursor="hand2"
+        )
+        self._reminder_interval_entry.pack(side="left", padx=(4, 2))
+        self._countdown_click_job = None
+        self._reminder_interval_entry.bind("<Button-1>", self._on_countdown_click)
+        self._reminder_interval_entry.bind("<Double-Button-1>", self._on_countdown_double_click)
+
+        # ⚙ Settings toggle button
+        self._settings_open = False
+        self._settings_btn = ttk.Button(sound_row, text="⚙ Settings ▸",
+                                        command=self._toggle_settings, width=12)
+        self._settings_btn.pack(side="left", padx=(6, 4))
+
+        ttk.Label(sound_row, text="|").pack(side="left", padx=4)
+
+        # ▶ Play / ⏸ Pause test buttons
+        self._test_playing = False
+        self._play_btn = ttk.Button(sound_row, text="▶ Play", command=self._play_test)
+        self._play_btn.pack(side="left", padx=(0, 3))
+        self._pause_btn = ttk.Button(sound_row, text="⏸ Pause", command=self._pause_test,
+                                     state="disabled")
+        self._pause_btn.pack(side="left")
+
+        # ── Collapsible settings panel (hidden by default) ────────────────────
+        self._settings_frame = ttk.LabelFrame(row2_outer, text="Sound Settings", padding=(8, 4))
+        # (not packed — shown only when ⚙ Settings is clicked)
+
+        # Sound mode radios
+        mode_row = ttk.Frame(self._settings_frame); mode_row.pack(fill="x", pady=(0, 4))
+        self.sound_mode = tk.StringVar(value="sine")
+        ttk.Radiobutton(mode_row, text="Binaural Beat", variable=self.sound_mode,
+                        value="sine", command=self._on_sound_mode_change).pack(side="left")
+        ttk.Radiobutton(mode_row, text="MP3 File", variable=self.sound_mode,
+                        value="mp3", command=self._on_sound_mode_change).pack(side="left", padx=(8, 0))
+
+        # Freq L / R (sine mode) — inside settings panel
+        self._freq_frame = ttk.Frame(mode_row)
+        self._freq_frame.pack(side="left", padx=(12, 0))
+        ttk.Label(self._freq_frame, text="L:").pack(side="left")
+        self.freq_l = tk.StringVar(value="200")
+        ttk.Entry(self._freq_frame, textvariable=self.freq_l, width=6).pack(side="left", padx=(2, 4))
+        ttk.Label(self._freq_frame, text="R:").pack(side="left")
+        self.freq_r = tk.StringVar(value="204")
+        ttk.Entry(self._freq_frame, textvariable=self.freq_r, width=6).pack(side="left", padx=(2, 4))
+        ttk.Label(self._freq_frame, text="Hz").pack(side="left")
+
+        # MP3 path — inside settings panel
+        self._mp3_frame = ttk.Frame(mode_row)
+        self.mp3_path = tk.StringVar(value="")
+        ttk.Entry(self._mp3_frame, textvariable=self.mp3_path, width=24).pack(side="left", padx=(12, 0))
+        ttk.Button(self._mp3_frame, text="Browse", command=self._browse_mp3).pack(side="left", padx=(4, 0))
+
+        # Volume slider — inside settings panel
+        vol_row = ttk.Frame(self._settings_frame); vol_row.pack(fill="x")
+        ttk.Label(vol_row, text="Volume:").pack(side="left")
+        self.sound_vol = tk.DoubleVar(value=0.5)
+        ttk.Scale(vol_row, variable=self.sound_vol, from_=0.0, to=1.0,
+                  orient="horizontal", length=120,
+                  command=lambda v: self.sound_engine.set_volume(float(v))).pack(side="left", padx=(6, 0))
+        self._vol_pct_label = ttk.Label(vol_row, text="50%", width=4)
+        self._vol_pct_label.pack(side="left", padx=4)
+        def _update_vol_pct(v):
+            self.sound_engine.set_volume(float(v))
+            self._vol_pct_label.configure(text=f"{int(float(v)*100)}%")
+        self.sound_vol.trace_add("write", lambda *_: _update_vol_pct(self.sound_vol.get()))
+
+        # Quick-add panel state
+        self._quick_panel = None
+        self._quick_dismiss_id = None
+
+        # Initial visibility
+        self._on_sound_mode_change()
+        self._on_reminder_toggle()
+
+
         self.activity_frame=ttk.LabelFrame(self.content,text="Session activity",padding=6)
+
         self.activity_frame.pack(fill="x",padx=14,pady=(0,10))
         activity_top=ttk.Frame(self.activity_frame); activity_top.pack(fill="x")
         self.session_total_text=tk.StringVar(value="Session total: 00:00")
@@ -845,6 +1127,7 @@ class App:
         PRIORITY_PLAYER = str(settings.get("priority_player", DEFAULT_PRIORITY_PLAYER)).lower()
         if PRIORITY_PLAYER not in {"mpc", "vlc"}: PRIORITY_PLAYER = DEFAULT_PRIORITY_PLAYER
         self.auto_start_value = bool(settings.get("auto_start", True))
+        self.load_focus_sound_settings()
 
     def save_player_settings(self, mode, priority, mpc_p, vlc_p, vlc_pass):
         global MPC_PORT, VLC_PORT, VLC_PASSWORD, PLAYER_MODE, PRIORITY_PLAYER
@@ -862,7 +1145,725 @@ class App:
         save(self.data)
         self.draw()
 
+    # ── Focus Sound helpers ──────────────────────────────────────────────────
+
+    # ---- lecture name helpers -----------------------------------------------
+
+    @staticmethod
+    def _truncate_lecture(name, prefix=5, suffix=3):
+        if not name or len(name) <= prefix + suffix + 3:
+            return name
+        return name[:prefix] + "..." + name[-suffix:]
+
+    def _tooltip_schedule(self, event):
+        self._tooltip_cancel(event)
+        if self.timer_lecture_full:
+            self._tooltip_id = self._lec_label.after(
+                700, lambda: self._tooltip_show(event.x_root, event.y_root)
+            )
+
+    def _tooltip_cancel(self, event=None):
+        if self._tooltip_id:
+            self._lec_label.after_cancel(self._tooltip_id)
+            self._tooltip_id = None
+        if self._tooltip_win:
+            try: self._tooltip_win.destroy()
+            except Exception: pass
+            self._tooltip_win = None
+
+    def _tooltip_show(self, x, y):
+        if not self.timer_lecture_full:
+            return
+        try:
+            tw = tk.Toplevel(self.root)
+            tw.overrideredirect(True)
+            tw.attributes("-topmost", True)
+            tw.geometry(f"+{x+12}+{y+8}")
+            tk.Label(tw, text=self.timer_lecture_full,
+                     font=("Segoe UI", 9), padx=8, pady=4,
+                     bg="#1e293b", fg="#f1f5f9",
+                     relief="solid", bd=1).pack()
+            self._tooltip_win = tw
+        except Exception:
+            pass
+
+    # ---- countdown helpers --------------------------------------------------
+
+    def load_focus_sound_settings(self):
+        """Load persisted focus-sound prefs; safe to call before build()."""
+        fs = self.data.get("_settings", {}).get("focus_sound", {})
+        # interval_sec (new) takes priority; fall back to interval_min (legacy)
+        raw = fs.get("interval_sec", fs.get("interval_min", 45) * 60)
+        self._fs_pending = {
+            "enabled":      bool(fs.get("enabled", False)),
+            "interval_sec": int(raw),
+            "mode":         str(fs.get("mode", "sine")),
+            "freq_l":       str(fs.get("freq_l", 200)),
+            "freq_r":       str(fs.get("freq_r", 204)),
+            "volume":       float(fs.get("volume", 0.5)),
+            "mp3_path":     str(fs.get("mp3_path", "")),
+        }
+        # 4 timer presets: list of {"sign": "+" or "-", "seconds": int}
+        default_presets = [
+            {"sign": "+", "seconds": 2700},  # +00:45:00
+            {"sign": "+", "seconds": 900},   # +00:15:00
+            {"sign": "+", "seconds": 1800},  # +00:30:00
+            {"sign": "+", "seconds": 300},   # +00:05:00
+        ]
+        raw_presets = fs.get("presets")
+        if isinstance(raw_presets, list) and len(raw_presets) > 0:
+            presets = []
+            for p in raw_presets[:4]:
+                if isinstance(p, dict) and "seconds" in p:
+                    sign = "-" if str(p.get("sign", "+")).strip() in {"-", "−"} else "+"
+                    try:
+                        sec = max(1, int(p.get("seconds", 900)))
+                        presets.append({"sign": sign, "seconds": sec})
+                    except (ValueError, TypeError):
+                        pass
+            self._timer_presets = presets if presets else list(default_presets)
+        else:
+            self._timer_presets = list(default_presets)
+
+    def _apply_focus_sound_to_ui(self):
+        """Push _fs_pending values into the tkinter variables (call after build)."""
+        p = getattr(self, "_fs_pending", None)
+        if not p:
+            return
+        self.reminder_enabled.set(p["enabled"])
+        self.reminder_interval.set(str(p["interval_sec"]))
+        self.sound_mode.set(p["mode"])
+        self.freq_l.set(p["freq_l"])
+        self.freq_r.set(p["freq_r"])
+        self.sound_vol.set(p["volume"])
+        self.mp3_path.set(p["mp3_path"])
+        self.sound_engine.configure(p["mode"], p["freq_l"], p["freq_r"],
+                                    p["mp3_path"], p["volume"])
+        self._on_sound_mode_change()
+        self._on_reminder_toggle()
+
+    def save_focus_sound_settings(self):
+        """Persist current focus-sound settings to the data JSON."""
+        try:
+            interval_sec = int(self.reminder_interval.get())
+        except ValueError:
+            interval_sec = 2700
+        fs = {
+            "enabled":      self.reminder_enabled.get(),
+            "interval_sec": interval_sec,
+            "mode":         self.sound_mode.get(),
+            "freq_l":       self._safe_freq(self.freq_l.get(), 200),
+            "freq_r":       self._safe_freq(self.freq_r.get(), 204),
+            "volume":       round(self.sound_vol.get(), 3),
+            "mp3_path":     self.mp3_path.get(),
+            "presets":      getattr(self, "_timer_presets", []),
+        }
+        self.data.setdefault("_settings", {})["focus_sound"] = fs
+        save(self.data)
+        self.sound_engine.configure(fs["mode"], fs["freq_l"], fs["freq_r"],
+                                    fs["mp3_path"], fs["volume"])
+
+    @staticmethod
+    def _safe_freq(val, default):
+        try:
+            f = float(val)
+            return f if 20 <= f <= 20000 else default
+        except (ValueError, TypeError):
+            return default
+
+    # ── Inline Quick-Add Panel & Direct Edit (No Toplevel) ────────────────────
+
+    def _on_countdown_click(self, event=None):
+        """Single-click debouncer: wait briefly to distinguish from double-click."""
+        if getattr(self, "_countdown_click_job", None) is not None:
+            self.root.after_cancel(self._countdown_click_job)
+        self._countdown_click_job = self.root.after(220, self._open_quick_add_panel)
+
+    def _on_countdown_double_click(self, event=None):
+        """Double-click handler: cancel single-click and open direct edit."""
+        if getattr(self, "_countdown_click_job", None) is not None:
+            self.root.after_cancel(self._countdown_click_job)
+            self._countdown_click_job = None
+        self._open_direct_edit_panel()
+
+    def _close_quick_panel(self):
+        """Close and destroy the inline floating panel, cleaning up root bindings."""
+        if getattr(self, "_quick_dismiss_id", None):
+            try:
+                self.root.unbind("<Button-1>", self._quick_dismiss_id)
+            except Exception:
+                pass
+            self._quick_dismiss_id = None
+        if self._quick_panel:
+            try:
+                self._quick_panel.destroy()
+            except Exception:
+                pass
+            self._quick_panel = None
+
+    def _setup_outside_dismiss(self, panel):
+        """Dismiss panel when the user clicks anywhere outside it."""
+        def _on_root_click(e):
+            if not self._quick_panel:
+                return
+            w = e.widget
+            inside = False
+            while w is not None:
+                if w == self._quick_panel or w == self._reminder_interval_entry:
+                    inside = True
+                    break
+                w = getattr(w, "master", None)
+            if not inside:
+                self._close_quick_panel()
+        self._quick_dismiss_id = self.root.bind("<Button-1>", _on_root_click, add="+")
+
+    def _get_panel_xy(self):
+        """Calculate placement on the RIGHT side of the countdown label."""
+        lbl = self._reminder_interval_entry
+        lbl.update_idletasks()
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        lbl_x = lbl.winfo_rootx()
+        lbl_y = lbl.winfo_rooty()
+        lbl_w = lbl.winfo_width()
+
+        x = lbl_x - root_x + lbl_w + 6
+        y = lbl_y - root_y
+        root_w = self.root.winfo_width()
+        if x + 240 > root_w:
+            x = max(10, root_w - 245)
+        return x, max(5, y)
+
+    def _get_current_live_seconds(self):
+        """Get the live remaining countdown seconds (or configured interval)."""
+        try:
+            total = max(1, int(self.reminder_interval.get()))
+        except (ValueError, TypeError):
+            total = 2700
+        if self.session and self.session.get("status") == "active" and self.reminder_enabled.get():
+            return max(0, total - getattr(self, "_reminder_elapsed", 0))
+        return total
+
+    def _apply_live_countdown_delta(self, delta_s):
+        """Add or subtract delta seconds from live countdown and update immediately."""
+        cur = self._get_current_live_seconds()
+        new_val = max(1, cur + delta_s)
+        self.reminder_interval.set(str(new_val))
+        self._reminder_elapsed = 0
+        rh, rr = divmod(new_val, 3600); rm, rs = divmod(rr, 60)
+        self._countdown_var.set(f"{rh:02d}:{rm:02d}:{rs:02d}")
+        self.save_focus_sound_settings()
+        self._close_quick_panel()
+
+    def _set_live_countdown_direct(self, total_s):
+        """Set live countdown directly to a specified total seconds."""
+        new_val = max(1, total_s)
+        self.reminder_interval.set(str(new_val))
+        self._reminder_elapsed = 0
+        rh, rr = divmod(new_val, 3600); rm, rs = divmod(rr, 60)
+        self._countdown_var.set(f"{rh:02d}:{rm:02d}:{rs:02d}")
+        self.save_focus_sound_settings()
+        self._close_quick_panel()
+
+    @staticmethod
+    def _format_preset_label(preset):
+        sign = "+" if preset.get("sign", "+") != "-" else "-"
+        sec = max(0, int(preset.get("seconds", 0)))
+        h, rem = divmod(sec, 3600)
+        m, s = divmod(rem, 60)
+        return f"{sign}{h:02d}:{m:02d}:{s:02d}"
+
+    def _build_hms_scroller(self, parent, initial_seconds=0):
+        """Creates an inline HH:MM:SS scroller frame with mousewheel support.
+        Returns (frame, get_seconds_func).
+        """
+        init_s = max(0, int(initial_seconds))
+        h_val, rem = divmod(init_s, 3600)
+        m_val, s_val = divmod(rem, 60)
+        h_val = min(99, h_val)
+
+        scroller_frame = tk.Frame(parent, bg="#0d1117")
+
+        h_var = tk.StringVar(value=f"{h_val:02d}")
+        m_var = tk.StringVar(value=f"{m_val:02d}")
+        s_var = tk.StringVar(value=f"{s_val:02d}")
+
+        def _step(var, delta, min_v, max_v, wrap):
+            try:
+                cur = int(var.get())
+            except (ValueError, TypeError):
+                cur = 0
+            if wrap:
+                new_v = (cur + delta) % (max_v + 1)
+                if new_v < min_v:
+                    new_v = max_v
+            else:
+                new_v = max(min_v, min(max_v, cur + delta))
+            var.set(f"{new_v:02d}")
+
+        def _bind_segment(widget, var, min_v, max_v, wrap):
+            def _on_wheel(e):
+                delta = 1 if getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4 else -1
+                _step(var, delta, min_v, max_v, wrap)
+                return "break"
+
+            widget.bind("<MouseWheel>", _on_wheel)
+            widget.bind("<Button-4>", _on_wheel)
+            widget.bind("<Button-5>", _on_wheel)
+            widget.bind("<Up>", lambda e: (_step(var, 1, min_v, max_v, wrap), "break")[1])
+            widget.bind("<Down>", lambda e: (_step(var, -1, min_v, max_v, wrap), "break")[1])
+            widget.bind("<Enter>", lambda e, w=widget: w.focus_set())
+
+            def _on_focus_out(e):
+                try:
+                    v = int(var.get())
+                    if wrap and max_v == 59:
+                        v = v % 60
+                    else:
+                        v = max(min_v, min(max_v, v))
+                except (ValueError, TypeError):
+                    v = 0
+                var.set(f"{v:02d}")
+            widget.bind("<FocusOut>", _on_focus_out)
+
+        digits_row = tk.Frame(scroller_frame, bg="#0d1117")
+        digits_row.pack(pady=(2, 0))
+
+        # HH Box (00-99)
+        hh_box = tk.Entry(digits_row, textvariable=h_var, width=3,
+                          font=("Consolas", 12, "bold"), justify="center",
+                          bg="#161b22", fg="#38bdf8", insertbackground="#38bdf8",
+                          relief="solid", bd=1)
+        hh_box.pack(side="left", padx=1)
+        _bind_segment(hh_box, h_var, 0, 99, wrap=False)
+
+        tk.Label(digits_row, text=":", font=("Consolas", 12, "bold"),
+                 bg="#0d1117", fg="#94a3b8").pack(side="left")
+
+        # MM Box (00-59)
+        mm_box = tk.Entry(digits_row, textvariable=m_var, width=3,
+                          font=("Consolas", 12, "bold"), justify="center",
+                          bg="#161b22", fg="#38bdf8", insertbackground="#38bdf8",
+                          relief="solid", bd=1)
+        mm_box.pack(side="left", padx=1)
+        _bind_segment(mm_box, m_var, 0, 59, wrap=True)
+
+        tk.Label(digits_row, text=":", font=("Consolas", 12, "bold"),
+                 bg="#0d1117", fg="#94a3b8").pack(side="left")
+
+        # SS Box (00-59)
+        ss_box = tk.Entry(digits_row, textvariable=s_var, width=3,
+                          font=("Consolas", 12, "bold"), justify="center",
+                          bg="#161b22", fg="#38bdf8", insertbackground="#38bdf8",
+                          relief="solid", bd=1)
+        ss_box.pack(side="left", padx=1)
+        _bind_segment(ss_box, s_var, 0, 59, wrap=True)
+
+        # Labels row: HH  MM  SS
+        sub_row = tk.Frame(scroller_frame, bg="#0d1117")
+        sub_row.pack(fill="x", pady=(1, 2))
+        tk.Label(sub_row, text="HH", font=("Segoe UI", 7), bg="#0d1117", fg="#64748b", width=4).pack(side="left", padx=1)
+        tk.Label(sub_row, text=" ", bg="#0d1117", width=1).pack(side="left")
+        tk.Label(sub_row, text="MM", font=("Segoe UI", 7), bg="#0d1117", fg="#64748b", width=4).pack(side="left", padx=1)
+        tk.Label(sub_row, text=" ", bg="#0d1117", width=1).pack(side="left")
+        tk.Label(sub_row, text="SS", font=("Segoe UI", 7), bg="#0d1117", fg="#64748b", width=4).pack(side="left", padx=1)
+
+        def get_total_seconds():
+            try: h = int(h_var.get())
+            except Exception: h = 0
+            try: m = int(m_var.get())
+            except Exception: m = 0
+            try: s = int(s_var.get())
+            except Exception: s = 0
+            return h * 3600 + m * 60 + s
+
+        return scroller_frame, get_total_seconds
+
+    def _open_quick_add_panel(self):
+        """Single-click on countdown: open inline quick-add panel on the RIGHT SIDE."""
+        self._countdown_click_job = None
+        if self._quick_panel:
+            self._close_quick_panel()
+            return
+
+        x, y = self._get_panel_xy()
+        panel = tk.Frame(self.root, relief="solid", bd=1, bg="#0d1117",
+                         highlightbackground="#30363d", highlightthickness=1,
+                         padx=8, pady=8)
+        panel.place(x=x, y=y)
+        self._quick_panel = panel
+        self._setup_outside_dismiss(panel)
+        self._render_presets_view()
+
+    def _render_presets_view(self):
+        """Render the 4 preset buttons + 1 Custom button inside the quick panel."""
+        if not self._quick_panel:
+            return
+        for child in self._quick_panel.winfo_children():
+            child.destroy()
+
+        header = tk.Label(self._quick_panel, text="Quick Add Time",
+                          font=("Segoe UI", 9, "bold"), bg="#0d1117", fg="#94a3b8")
+        header.pack(anchor="w", pady=(0, 4))
+
+        # Grid of presets (2 columns, up to 4 buttons)
+        grid_frame = tk.Frame(self._quick_panel, bg="#0d1117")
+        grid_frame.pack(fill="x")
+
+        presets = getattr(self, "_timer_presets", [])
+        for i, p in enumerate(presets[:4]):
+            r, c = divmod(i, 2)
+            lbl_text = self._format_preset_label(p)
+            btn = ttk.Button(grid_frame, text=lbl_text, width=11)
+            btn.grid(row=r, column=c, padx=3, pady=3, sticky="ew")
+
+            delta = p["seconds"] if p.get("sign", "+") != "-" else -p["seconds"]
+            btn.configure(command=lambda d=delta: self._apply_live_countdown_delta(d))
+
+            # Right click context menu for this specific preset button
+            btn.bind("<Button-3>", lambda e, idx=i: self._show_preset_context_menu(e, idx))
+            btn.bind("<Button-2>", lambda e, idx=i: self._show_preset_context_menu(e, idx))
+
+        if len(presets) < 4:
+            add_slot = ttk.Button(grid_frame, text="＋ Add Preset", width=11,
+                                  command=lambda: self._render_add_custom_box_view())
+            r, c = divmod(len(presets), 2)
+            add_slot.grid(row=r, column=c, padx=3, pady=3, sticky="ew")
+
+        ttk.Separator(self._quick_panel, orient="horizontal").pack(fill="x", pady=6)
+
+        # 5th button: Custom Button
+        custom_btn = ttk.Button(self._quick_panel, text="✎ Custom",
+                                command=self._render_custom_view)
+        custom_btn.pack(fill="x", padx=3)
+
+    def _show_preset_context_menu(self, event, index):
+        """Show context menu specifically for the right-clicked preset button."""
+        if not (0 <= index < len(getattr(self, "_timer_presets", []))):
+            return
+        menu = tk.Menu(self.root, tearoff=0, bg="#161b22", fg="#e6edf3",
+                       activebackground="#1f6feb", activeforeground="#ffffff",
+                       relief="solid", bd=1)
+        menu.add_command(label="Edit",
+                         command=lambda: self._render_edit_preset_view(index))
+        menu.add_command(label="Change to Opposite Sign",
+                         command=lambda: self._toggle_preset_sign(index))
+        menu.add_command(label="Remove",
+                         command=lambda: self._remove_preset(index))
+        menu.add_command(label="Add a Custom Box",
+                         command=lambda: self._render_add_custom_box_view(replace_index=index))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _toggle_preset_sign(self, index):
+        """Toggle the sign (+ <-> -) of the specified preset."""
+        if 0 <= index < len(self._timer_presets):
+            cur = self._timer_presets[index].get("sign", "+")
+            self._timer_presets[index]["sign"] = "-" if cur == "+" else "+"
+            self.save_focus_sound_settings()
+            self._render_presets_view()
+
+    def _remove_preset(self, index):
+        """Remove the specified preset button."""
+        if 0 <= index < len(self._timer_presets):
+            del self._timer_presets[index]
+            self.save_focus_sound_settings()
+            self._render_presets_view()
+
+    def _render_edit_preset_view(self, index):
+        """Inline view to edit duration and sign for a preset button."""
+        if not self._quick_panel or not (0 <= index < len(self._timer_presets)):
+            return
+        for child in self._quick_panel.winfo_children():
+            child.destroy()
+
+        preset = self._timer_presets[index]
+        cur_sign = preset.get("sign", "+")
+        cur_sec = preset.get("seconds", 900)
+
+        header = tk.Label(self._quick_panel, text=f"Edit Preset #{index + 1}",
+                          font=("Segoe UI", 9, "bold"), bg="#0d1117", fg="#38bdf8")
+        header.pack(anchor="w", pady=(0, 4))
+
+        sign_row = tk.Frame(self._quick_panel, bg="#0d1117")
+        sign_row.pack(fill="x", pady=2)
+        tk.Label(sign_row, text="Sign:", bg="#0d1117", fg="#94a3b8", font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
+
+        sign_var = tk.StringVar(value="+" if cur_sign != "-" else "-")
+        sign_btn = tk.Button(sign_row, textvariable=sign_var,
+                             font=("Consolas", 10, "bold"), width=4,
+                             bg="#21262d", fg="#58a6ff", relief="solid", bd=1)
+        sign_btn.configure(command=lambda: sign_var.set("-" if sign_var.get() == "+" else "+"))
+        sign_btn.pack(side="left")
+
+        scroller, get_sec = self._build_hms_scroller(self._quick_panel, initial_seconds=cur_sec)
+        scroller.pack(fill="x", pady=4)
+
+        btn_row = tk.Frame(self._quick_panel, bg="#0d1117")
+        btn_row.pack(fill="x", pady=(4, 0))
+
+        def _save():
+            new_s = max(1, get_sec())
+            new_sign = "-" if sign_var.get() == "-" else "+"
+            self._timer_presets[index] = {"sign": new_sign, "seconds": new_s}
+            self.save_focus_sound_settings()
+            self._render_presets_view()
+
+        ttk.Button(btn_row, text="Save", command=_save).pack(side="left", padx=2)
+        ttk.Button(btn_row, text="Cancel", command=self._render_presets_view).pack(side="left", padx=2)
+
+    def _render_add_custom_box_view(self, replace_index=None):
+        """Inline view to add/create a custom timer preset."""
+        if not self._quick_panel:
+            return
+        for child in self._quick_panel.winfo_children():
+            child.destroy()
+
+        header = tk.Label(self._quick_panel, text="Add Timer Preset",
+                          font=("Segoe UI", 9, "bold"), bg="#0d1117", fg="#38bdf8")
+        header.pack(anchor="w", pady=(0, 4))
+
+        sign_row = tk.Frame(self._quick_panel, bg="#0d1117")
+        sign_row.pack(fill="x", pady=2)
+        tk.Label(sign_row, text="Sign:", bg="#0d1117", fg="#94a3b8", font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
+
+        sign_var = tk.StringVar(value="+")
+        sign_btn = tk.Button(sign_row, textvariable=sign_var,
+                             font=("Consolas", 10, "bold"), width=4,
+                             bg="#21262d", fg="#58a6ff", relief="solid", bd=1)
+        sign_btn.configure(command=lambda: sign_var.set("-" if sign_var.get() == "+" else "+"))
+        sign_btn.pack(side="left")
+
+        scroller, get_sec = self._build_hms_scroller(self._quick_panel, initial_seconds=900)
+        scroller.pack(fill="x", pady=4)
+
+        btn_row = tk.Frame(self._quick_panel, bg="#0d1117")
+        btn_row.pack(fill="x", pady=(4, 0))
+
+        def _add():
+            new_s = max(1, get_sec())
+            new_sign = "-" if sign_var.get() == "-" else "+"
+            new_item = {"sign": new_sign, "seconds": new_s}
+            if len(self._timer_presets) < 4:
+                self._timer_presets.append(new_item)
+            elif replace_index is not None and 0 <= replace_index < len(self._timer_presets):
+                self._timer_presets[replace_index] = new_item
+            else:
+                self._timer_presets[0] = new_item
+            self.save_focus_sound_settings()
+            self._render_presets_view()
+
+        ttk.Button(btn_row, text="Add", command=_add).pack(side="left", padx=2)
+        ttk.Button(btn_row, text="Cancel", command=self._render_presets_view).pack(side="left", padx=2)
+
+    def _render_custom_view(self):
+        """Inline view for the 5th Custom button to add/subtract custom time."""
+        if not self._quick_panel:
+            return
+        for child in self._quick_panel.winfo_children():
+            child.destroy()
+
+        header = tk.Label(self._quick_panel, text="Custom Time (Scroll HH:MM:SS)",
+                          font=("Segoe UI", 9, "bold"), bg="#0d1117", fg="#94a3b8")
+        header.pack(anchor="w", pady=(0, 4))
+
+        is_add = tk.BooleanVar(value=True)
+        mode_btn = tk.Button(self._quick_panel, text="+ Add to Countdown",
+                             font=("Segoe UI", 9, "bold"), bg="#238636", fg="#ffffff",
+                             activebackground="#2ea043", relief="flat", padx=6, pady=2)
+        def _toggle_mode():
+            if is_add.get():
+                is_add.set(False)
+                mode_btn.configure(text="- Subtract from Countdown", bg="#da3633", activebackground="#f85149")
+            else:
+                is_add.set(True)
+                mode_btn.configure(text="+ Add to Countdown", bg="#238636", activebackground="#2ea043")
+        mode_btn.configure(command=_toggle_mode)
+        mode_btn.pack(fill="x", pady=2)
+
+        scroller, get_sec = self._build_hms_scroller(self._quick_panel, initial_seconds=900)
+        scroller.pack(fill="x", pady=4)
+
+        btn_row = tk.Frame(self._quick_panel, bg="#0d1117")
+        btn_row.pack(fill="x", pady=(4, 0))
+
+        def _apply():
+            s = get_sec()
+            delta = s if is_add.get() else -s
+            self._apply_live_countdown_delta(delta)
+
+        ttk.Button(btn_row, text="Apply", command=_apply).pack(side="left", padx=2)
+        ttk.Button(btn_row, text="Back", command=self._render_presets_view).pack(side="left", padx=2)
+
+    def _open_direct_edit_panel(self):
+        """Double-click on countdown: directly edit the live countdown inline."""
+        self._countdown_click_job = None
+        if self._quick_panel:
+            self._close_quick_panel()
+
+        x, y = self._get_panel_xy()
+        panel = tk.Frame(self.root, relief="solid", bd=1, bg="#0d1117",
+                         highlightbackground="#30363d", highlightthickness=1,
+                         padx=8, pady=8)
+        panel.place(x=x, y=y)
+        self._quick_panel = panel
+        self._setup_outside_dismiss(panel)
+
+        header = tk.Label(panel, text="Direct Edit Countdown",
+                          font=("Segoe UI", 9, "bold"), bg="#0d1117", fg="#38bdf8")
+        header.pack(anchor="w", pady=(0, 4))
+
+        cur_sec = self._get_current_live_seconds()
+        scroller, get_sec = self._build_hms_scroller(panel, initial_seconds=cur_sec)
+        scroller.pack(fill="x", pady=4)
+
+        btn_row = tk.Frame(panel, bg="#0d1117")
+        btn_row.pack(fill="x", pady=(4, 0))
+
+        def _set_direct(e=None):
+            new_s = max(1, get_sec())
+            self._set_live_countdown_direct(new_s)
+
+        ttk.Button(btn_row, text="Set", command=_set_direct).pack(side="left", padx=2)
+        ttk.Button(btn_row, text="Cancel", command=self._close_quick_panel).pack(side="left", padx=2)
+        panel.bind("<Return>", _set_direct)
+
+    def _toggle_settings(self):
+        """Show/hide the collapsible Sound Settings panel."""
+        if self._settings_open:
+            self._settings_frame.pack_forget()
+            self._settings_btn.configure(text="⚙ Settings ▸")
+        else:
+            self._settings_frame.pack(fill="x", pady=(4, 0))
+            self._settings_btn.configure(text="⚙ Settings ▾")
+        self._settings_open = not self._settings_open
+
+    def _play_test(self):
+        """Start test sound playing indefinitely."""
+        FocusSoundEngine._check_libs()
+        mode = self.sound_mode.get()
+        if mode == "sine" and not FocusSoundEngine._sd_ok:
+            messagebox.showinfo("Missing libraries",
+                                FocusSoundEngine.missing_libs_message("sine"), parent=self.root)
+            return
+        if mode == "mp3" and not FocusSoundEngine._pg_ok:
+            messagebox.showinfo("Missing libraries",
+                                FocusSoundEngine.missing_libs_message("mp3"), parent=self.root)
+            return
+        self.save_focus_sound_settings()
+        self.sound_engine.stop()
+        self.sound_engine.play()       # no duration_s → plays until stopped
+        self._test_playing = True
+        self._play_btn.configure(state="disabled")
+        self._pause_btn.configure(text="⏸ Pause", state="normal")
+
+    def _pause_test(self):
+        """Pause (stop) the test sound."""
+        self.sound_engine.stop()
+        self._test_playing = False
+        self._play_btn.configure(state="normal")
+        self._pause_btn.configure(state="disabled")
+
+    def _on_reminder_toggle(self):
+        """Grey out controls when reminder is disabled; save on every change."""
+        enabled = self.reminder_enabled.get()
+        state = "normal" if enabled else "disabled"
+        for w in self._sound_controls():
+            try: w.configure(state=state)
+            except Exception: pass
+        # Also gate Settings and Play/Pause buttons
+        for btn in (getattr(self, "_settings_btn", None),
+                    getattr(self, "_play_btn", None),
+                    getattr(self, "_pause_btn", None)):
+            if btn:
+                try: btn.configure(state=state)
+                except Exception: pass
+        if hasattr(self, "sound_engine"):
+            self.save_focus_sound_settings()
+
+    def _sound_controls(self):
+        """Return reminder-related widgets for bulk enable/disable."""
+        widgets = []
+        if hasattr(self, "_reminder_interval_entry"):
+            widgets.append(self._reminder_interval_entry)
+        for frame in (getattr(self, "_freq_frame", None),
+                      getattr(self, "_mp3_frame", None),
+                      getattr(self, "_settings_frame", None)):
+            if frame:
+                try:
+                    for child in frame.winfo_children():
+                        widgets.append(child)
+                        # recurse one level for nested frames
+                        try:
+                            for gc in child.winfo_children():
+                                widgets.append(gc)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        return widgets
+
+    def _on_sound_mode_change(self):
+        """Show freq entries for sine mode, MP3 path for mp3 mode (inside settings panel)."""
+        mode = self.sound_mode.get()
+        if mode == "sine":
+            self._freq_frame.pack(side="left", padx=(12, 0))
+            self._mp3_frame.pack_forget()
+        else:
+            self._freq_frame.pack_forget()
+            self._mp3_frame.pack(side="left")
+        if hasattr(self, "sound_engine"):
+            self.save_focus_sound_settings()
+
+    def _browse_mp3(self):
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="Select MP3 file",
+            filetypes=[("Audio files", "*.mp3 *.wav *.ogg *.flac"), ("All files", "*.*")]
+        )
+        if path:
+            self.mp3_path.set(path)
+            self.save_focus_sound_settings()
+
+    def _fire_reminder(self):
+        """Called when the study reminder countdown reaches zero."""
+        # Stop any test sound first; don't play if already playing from session
+        FocusSoundEngine._check_libs()
+        mode = self.sound_mode.get()
+        if mode == "sine" and not FocusSoundEngine._sd_ok:
+            messagebox.showinfo("Missing libraries",
+                                FocusSoundEngine.missing_libs_message("sine"), parent=self.root)
+            return
+        if mode == "mp3" and not FocusSoundEngine._pg_ok:
+            messagebox.showinfo("Missing libraries",
+                                FocusSoundEngine.missing_libs_message("mp3"), parent=self.root)
+            return
+        self.sound_engine.stop()
+        self.sound_engine.play(duration_s=5)
+        self._show_reminder_toast()
+
+    def _show_reminder_toast(self):
+        """Briefly flash a reminder banner centred on the app window."""
+        try:
+            toast = tk.Toplevel(self.root)
+            toast.overrideredirect(True)
+            toast.attributes("-topmost", True)
+            rx = self.root.winfo_x() + self.root.winfo_width() // 2
+            ry = self.root.winfo_y() + self.root.winfo_height() // 2
+            toast.geometry(f"320x54+{rx - 160}+{ry - 27}")
+            tk.Label(toast, text="🔔  Study Reminder — consider a short break!",
+                     font=("Segoe UI", 11), padx=12, pady=12,
+                     bg="#1e293b", fg="#38bdf8").pack(fill="both", expand=True)
+            toast.after(4000, toast.destroy)
+        except Exception:
+            pass
+
+    # ── End Focus Sound helpers ──────────────────────────────────────────────
+
+
+
+
     def check_first_run(self):
+
         settings = self.data.get("_settings", {})
         if "player_mode" not in settings:
             self.first_run_dialog()
@@ -1638,20 +2639,26 @@ class App:
 
     def start_session(self):
         if self.session and self.session["status"]=="paused":
+            self._reminder_elapsed = 0  # reset countdown on resume
             self.session["status"]="active"; self.session["resumed_at"]=datetime.now().isoformat(timespec="seconds"); self.update_session_display(); return
         if self.session:return
         counter=int(self.data.get("_session_counter",0) or 0)+1
         self.data["_session_counter"]=counter
         self.session={"id":f"Session{counter:04d}","status":"active","started_at":datetime.now().isoformat(timespec="seconds"),"total":0,"video_total":0,"segments":[]}
         save(self.data)
+        self._reminder_elapsed = 0  # reset countdown on new session
         self.auto_block_path=None; self.update_session_display()
 
     def pause_session(self):
         if not self.session:return
+        self.sound_engine.stop()          # stop reminder sound on pause
+        self._reminder_elapsed = 0        # reset countdown
         self.track_activity(self.current_info,self.find_current_lecture(self.current_info)); self.finish_segment(); self.session["status"]="paused"; self.update_session_display(); save(self.data)
 
     def stop_session(self,save_session=True):
         if not self.session:return
+        self.sound_engine.stop()          # stop reminder sound on session end
+        self._reminder_elapsed = 0        # reset countdown
         self.track_activity(self.current_info,self.find_current_lecture(self.current_info)); self.finish_segment()
         if save_session:
             completed=dict(self.session); completed["ended_at"]=datetime.now().isoformat(timespec="seconds")
@@ -1659,11 +2666,14 @@ class App:
             completed["segments"]=self.session.get("segments",[])
             self.data.setdefault("_study_sessions",[]).append(completed); save(self.data)
         if self.current_info:self.auto_block_path=self.current_info.get("path")
+        self.timer_lecture_full = ""
         self.session=None; self.active_segment=None; self.timer_text.set("00:00:00"); self.timer_lecture.set("Waiting for media player activity"); self.update_session_display(); self.draw()
+
 
     def close(self):
         self._poller_active = False
         self.stop_session(save_session=True)
+        self.sound_engine.stop()          # ensure audio thread is cleaned up
         try:
             self.root.destroy()
         except Exception:
@@ -2019,9 +3029,11 @@ class App:
 
         self.track_activity(info, lecture)
         if lecture and self.session and self.session["status"] == "active":
-            self.timer_lecture.set(lecture.name)
+            self.timer_lecture_full = lecture.name
+            self.timer_lecture.set(self._truncate_lecture(lecture.name))
         elif not lecture and self.session:
-            self.timer_lecture.set("Waiting for recognized lecture")
+            self.timer_lecture_full = ""
+            self.timer_lecture.set("Waiting...")
         if self.session:
             self.update_session_display()
             needs_redraw = True
@@ -2029,7 +3041,35 @@ class App:
         if needs_redraw:
             self.draw()
 
+        # ── Study Reminder countdown ──────────────────────────────────────────
+        if self.session and self.session.get("status") == "active" and self.reminder_enabled.get():
+            self._reminder_elapsed += 1
+            try:
+                interval_s = max(1, int(self.reminder_interval.get()))  # already in seconds
+            except ValueError:
+                interval_s = 2700
+            remaining = max(0, interval_s - self._reminder_elapsed)
+            rh, rr = divmod(remaining, 3600); rm, rs = divmod(rr, 60)
+            self._countdown_var.set(f"{rh:02d}:{rm:02d}:{rs:02d}")
+            if self._reminder_elapsed >= interval_s:
+                self._reminder_elapsed = 0
+                self._fire_reminder()
+        else:
+            # Show configured interval as static display when not in session
+            try:
+                total = max(0, int(self.reminder_interval.get()))
+            except (ValueError, AttributeError):
+                total = 2700
+            if self.reminder_enabled.get():
+                th, tr = divmod(total, 3600); tm, ts = divmod(tr, 60)
+                self._countdown_var.set(f"{th:02d}:{tm:02d}:{ts:02d}")
+            else:
+                try: self._countdown_var.set("--:--:--")
+                except AttributeError: pass
+        # ─────────────────────────────────────────────────────────────────────
+
         self.root.after(1000, self.loop)
+
 
 if __name__=="__main__":
     r=tk.Tk(); r.withdraw()
