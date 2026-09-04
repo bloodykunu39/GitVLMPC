@@ -625,9 +625,10 @@ class App:
         def _on_mousewheel(event):
             if not event.delta:
                 return
-            pixels = int(-1 * (event.delta / 120) * 56) if abs(event.delta) >= 120 else int(-1 * event.delta * (56 / 120))
+            scroll_speed = 24
+            pixels = int(-1 * (event.delta / 120) * scroll_speed) if abs(event.delta) >= 120 else int(-1 * event.delta * (scroll_speed / 120))
             if pixels == 0:
-                pixels = -56 if event.delta > 0 else 56
+                pixels = -scroll_speed if event.delta > 0 else scroll_speed
             direction = 1 if pixels > 0 else -1
 
             target = self.root.winfo_containing(event.x_root, event.y_root)
@@ -656,8 +657,8 @@ class App:
             return "break"
 
         self.root.bind_all("<MouseWheel>", _on_mousewheel)
-        self.root.bind_all("<Button-4>", lambda e: self.main_canvas.yview_scroll(-56, "units"))
-        self.root.bind_all("<Button-5>", lambda e: self.main_canvas.yview_scroll(56, "units"))
+        self.root.bind_all("<Button-4>", lambda e: self.main_canvas.yview_scroll(-24, "units"))
+        self.root.bind_all("<Button-5>", lambda e: self.main_canvas.yview_scroll(24, "units"))
 
         f=ttk.Frame(self.content,padding=(14,12,14,6)); f.pack(fill="x")
         
