@@ -380,16 +380,19 @@ class FocusSoundEngine:
         self._pg_initialized = False
 
     def configure(self, mode, freq_l, freq_r, mp3_path, volume):
-        was_playing = self._playing
-        self.stop()
         with self._lock:
+            mode_changed = (self._mode != mode)
+            mp3_changed = (self._mp3_path != str(mp3_path))
             self._mode = mode
             self._freq_l = float(freq_l)
             self._freq_r = float(freq_r)
             self._mp3_path = str(mp3_path)
             self._volume = max(0.0, min(1.0, float(volume)))
-        if was_playing:
-            self.play()
+        # In sine mode, frequencies and volume are read live on each block, no stream restart needed!
+        if mode_changed or (mode == "mp3" and mp3_changed):
+            if self._playing:
+                self.stop()
+                self.play()
 
     def set_volume(self, v):
         self._volume = max(0.0, min(1.0, float(v)))
@@ -414,22 +417,30 @@ class FocusSoundEngine:
             if self._mode == "sine":
                 if not self._sd_ok:
                     return
+                self._playing = True
                 self._stop_after = time.monotonic() + duration_s if duration_s else None
                 self._phase_l = 0.0
                 self._phase_r = 0.0
                 try:
                     import sounddevice as sd
-                    self._stream = sd.OutputStream(
+                    st = None
+                    def _fin():
+                        with self._lock:
+                            if self._stream is st:
+                                self._playing = False
+                                self._stream = None
+                    st = sd.OutputStream(
                         samplerate=44100,
                         channels=2,
                         dtype="float32",
                         blocksize=1024,
                         callback=self._sine_callback,
-                        finished_callback=self._stream_finished,
+                        finished_callback=_fin,
                     )
-                    self._stream.start()
-                    self._playing = True
+                    self._stream = st
+                    st.start()
                 except Exception:
+                    self._playing = False
                     self._stream = None
             else:
                 # MP3 mode
@@ -2249,9 +2260,7 @@ class App:
             return
         self._test_playing = True
         self._update_sound_buttons()       # immediate UI color change (0ms)
-        self.sound_engine.stop()
         self.sound_engine.play()          # no duration_s -> plays until stopped
-        self.save_focus_sound_settings()
 
     def _pause_test(self):
         """Pause (stop) the test sound immediately with instant visual feedback."""
