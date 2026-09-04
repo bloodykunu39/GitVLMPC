@@ -628,6 +628,30 @@ class App:
             pixels = int(-1 * (event.delta / 120) * 56) if abs(event.delta) >= 120 else int(-1 * event.delta * (56 / 120))
             if pixels == 0:
                 pixels = -56 if event.delta > 0 else 56
+            direction = 1 if pixels > 0 else -1
+
+            target = self.root.winfo_containing(event.x_root, event.y_root)
+            tree_widget = None
+            w = target
+            while w:
+                w_str = str(w).lower()
+                if "treeview" in w_str:
+                    tree_widget = w
+                    break
+                w = getattr(w, "master", None)
+
+            if tree_widget:
+                try:
+                    first, last = tree_widget.yview()
+                    if direction > 0 and last < 0.999:
+                        tree_widget.yview_scroll(1, "units")
+                        return "break"
+                    elif direction < 0 and first > 0.001:
+                        tree_widget.yview_scroll(-1, "units")
+                        return "break"
+                except Exception:
+                    pass
+
             self.main_canvas.yview_scroll(pixels, "units")
             return "break"
 
@@ -1275,11 +1299,6 @@ class App:
         self.vars[5].set("Study time: "+big(study_total))
         self.pb["value"]=pct
         self.selected_count.set(f"{len(self.checked)} selected" if self.select_mode else "")
-
-        target_height = max(12, len(rows))
-        if self.tree.cget("height") != target_height:
-            self.tree.configure(height=target_height)
-
         self.draw_activity()
 
     def draw_activity(self):
@@ -1329,10 +1348,6 @@ class App:
             for segment in valid_sessions:
                 started = str(segment.get("started_at", ""))
                 self.activity_tree.insert("", "end", values=(segment.get("session_name", ""), segment.get("lecture", ""), started.replace("T", " "), fmt(segment.get("session_duration", segment.get("duration", 0))), fmt(segment.get("video_play_duration", segment.get("duration", 0)))))
-
-        target_act_height = max(4, min(10, len(valid_sessions)))
-        if self.activity_tree.cget("height") != target_act_height:
-            self.activity_tree.configure(height=target_act_height)
 
     def sort_activity(self,column):
         if self.activity_sort_column==column:
