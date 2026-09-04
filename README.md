@@ -27,7 +27,7 @@ The app supports common video formats including MP4, MKV, AVI, WebM, MOV, M4V, T
 
 Progress is stored in `.lecture_progress.json` inside the selected video folder. That file is ignored by Git because it is specific to each user.
 Checkbox selections are temporary and are cleared when selection mode is closed or the app is restarted.
-Ratings use a 1-5 scale. The average rating excludes lectures without a rating, and ratings/reviews are included in progress exports.
+Ratings use a 1-5 scale in 0.5-star steps. The average rating excludes lectures without a rating, and ratings/reviews are included in progress exports.
 
 ## Features
 
@@ -35,6 +35,11 @@ Ratings use a 1-5 scale. The average rating excludes lectures without a rating, 
 - Reads the currently playing file and position from MPC-BE.
 - Tracks the furthest position reached for each lecture.
 - Shows total, covered, remaining, and overall progress.
+- Double-clicks on Total, Covered, Remaining, Average rating, or Study time open an interactive Pie/Bar chart.
+- Double-clicking a lecture's Time Spent cell opens a session-wise chart with session time, video-playing time, and percentage share on hover.
+- Charts sort lecture bars by name and show full filename, duration, percentage share, and file size on hover.
+- Average rating shows the number of lectures at each star level, while Study time uses dated sessions on the chart axis.
+- The rating bar chart plots lecture count against 1-5 ratings and marks the average rating with a line.
 - Stores a 1-5 rating and review for each lecture and shows the average rating.
 - Provides a user-controlled study stopwatch for the selected lecture with Start, Pause, Resume, and Stop.
 - Saves timestamped sessions, shows per-lecture Time Spent, total Study time, and a session history.

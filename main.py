@@ -1,4 +1,4 @@
-import json, os, re, shutil, subprocess, tkinter as tk, time
+import json, math, os, re, shutil, subprocess, tkinter as tk, time
 from datetime import datetime
 from pathlib import Path
 from tkinter import ttk, messagebox, simpledialog, filedialog
@@ -101,7 +101,12 @@ class App:
         self.search_var.trace_add("write",lambda *_: self.draw())
         s=ttk.Frame(f); s.pack(fill="x",pady=10)
         self.vars=[tk.StringVar() for _ in range(6)]
-        for v in self.vars: ttk.Label(s,textvariable=v,font=("Segoe UI",11)).pack(side="left",padx=(0,25))
+        summary_names=("total","covered","remaining","overall","rating","study")
+        self.summary_labels=[]
+        for v,name in zip(self.vars,summary_names):
+            label=ttk.Label(s,textvariable=v,font=("Segoe UI",11)); label.pack(side="left",padx=(0,25))
+            label.bind("<Double-Button-1>",lambda e,metric=name:self.open_chart(metric))
+            self.summary_labels.append(label)
         self.pb=ttk.Progressbar(f,maximum=100); self.pb.pack(fill="x")
         n=ttk.LabelFrame(self.root,text="Currently Playing",padding=10); n.pack(fill="x",padx=14,pady=10)
         self.now=tk.StringVar(value="Waiting for MPC-BE...")
@@ -239,6 +244,100 @@ class App:
             messagebox.showinfo("MPC-BE connection",f"Connected to MPC-BE on port {MPC_PORT}.")
         else:
             messagebox.showwarning("MPC-BE connection",f"Could not connect on port {MPC_PORT}. Check MPC-BE's web interface settings.")
+
+    def short_name(self,name):
+        return name if len(name)<=26 else name[:20]+"**"+name[-4:]
+
+    def file_size(self,path):
+        try:return path.stat().st_size
+        except OSError:return 0
+
+    def chart_data(self,metric):
+        if metric in ("total","covered","remaining","overall"):
+            values=[]
+            for path in vids():
+                record=self.data.get(str(path.resolve()),{}); duration=float(record.get("duration") or 0); covered=min(float(record.get("furthest") or 0),duration) if duration else 0
+                value=duration if metric=="total" else covered if metric=="covered" else max(0,duration-covered) if metric=="remaining" else (covered/duration*100 if duration else 0)
+                if value:values.append({"name":path.name,"label":self.short_name(path.name),"value":value,"duration":duration,"size":self.file_size(path)})
+            return sorted(values,key=lambda item:item["name"].lower())
+        if metric=="rating":
+            counts={rating:0 for rating in [index/2 for index in range(1,11)]}
+            for path in vids():
+                rating=float(self.data.get(str(path.resolve()),{}).get("rating") or 0)
+                rating=round(rating*2)/2
+                if rating in counts:counts[rating]+=1
+            return [{"name":f"{rating:g} star","label":f"{rating:g}","value":value} for rating,value in counts.items()]
+        sessions=[session for session in self.data.get("_study_sessions",[]) if isinstance(session,dict)]
+        if not sessions:
+            grouped={}
+            for segment in self.data.get("_sessions",[]):
+                if not isinstance(segment,dict):continue
+                name=segment.get("session_name") or "Legacy activity"
+                item=grouped.setdefault(name,{"id":name,"started_at":segment.get("started_at",""),"total":0,"video_total":0})
+                item["total"]+=float(segment.get("session_duration",segment.get("duration",0)) or 0)
+                item["video_total"]+=float(segment.get("video_play_duration",segment.get("duration",0)) or 0)
+            sessions=list(grouped.values())
+        if self.session:sessions.append(self.session)
+        return [{"name":session.get("id","Unknown"),"label":session.get("id","Unknown"),"value":float(session.get("total",0) or 0),"video":float(session.get("video_total",0) or 0),"date":str(session.get("started_at",""))[:10]} for session in sorted(sessions,key=lambda item:str(item.get("started_at","")))]
+
+    def open_chart(self,metric):
+        title="Time Spent by Session" if metric=="spent" else f"{metric.title()} chart"
+        window=tk.Toplevel(self.root); window.title(title); window.geometry("850x560")
+        controls=ttk.Frame(window); controls.pack(fill="x",padx=10,pady=8)
+        chart_type=tk.StringVar(value="pie")
+        ttk.Label(controls,text="Chart:").pack(side="left")
+        ttk.Radiobutton(controls,text="Pie",variable=chart_type,value="pie").pack(side="left",padx=5)
+        ttk.Radiobutton(controls,text="Bar",variable=chart_type,value="bar").pack(side="left")
+        canvas=tk.Canvas(window,background="white",highlightthickness=1,highlightbackground="#cccccc")
+        canvas.pack(fill="both",expand=True,padx=10,pady=(0,5))
+        details=tk.StringVar(value="Hover a chart item for details")
+        ttk.Label(window,textvariable=details,anchor="w",wraplength=820).pack(fill="x",padx=10,pady=8)
+        items=self.chart_data(metric)
+        colors=("#377eb8","#4daf4a","#e41a1c","#984ea3","#ff7f00","#a65628","#f781bf","#999999")
+
+        def render(*_):
+            canvas.delete("all"); canvas.tag_unbind("chart", "<Enter>"); canvas.tag_unbind("chart", "<Leave>")
+            if not items:
+                canvas.create_text(420,250,text="No data available",fill="#666"); return
+            if chart_type.get()=="pie":
+                total=sum(item["value"] for item in items); start=-90; cx,cy,r=330,260,190
+                for index,item in enumerate(items):
+                    extent=item["value"]/total*360; tag=f"chart{index}"; canvas.create_arc(cx-r,cy-r,cx+r,cy+r,start=start,extent=extent,fill=colors[index%len(colors)],outline="white",tags=("chart",tag))
+                    canvas.tag_bind(tag,"<Enter>",lambda e,current=item:self.chart_details(current,metric,details,total))
+                    start+=extent
+                canvas.create_text(650,80,text=title,font=("Segoe UI",14,"bold"))
+                for index,item in enumerate(items):canvas.create_rectangle(540,110+index*24,555,125+index*24,fill=colors[index%len(colors)],outline=""); canvas.create_text(565,117+index*24,text=item["label"],anchor="w")
+            else:
+                canvas.create_text(440,20,text=title,font=("Segoe UI",14,"bold"))
+                if metric=="rating":
+                    maximum=max(item["value"] for item in items) or 1; left=75; bottom=450; chart_height=350; bar_width=48; spacing=70; total=sum(i["value"] for i in items)
+                    for index,item in enumerate(items):
+                        x=left+index*spacing; bar_height=item["value"]/maximum*chart_height; tag=f"chart{index}"; canvas.create_rectangle(x,bottom-bar_height,x+bar_width,bottom,fill=colors[index%len(colors)],outline="",tags=("chart",tag)); canvas.create_text(x+bar_width/2,bottom+15,text=item["label"],anchor="n"); canvas.tag_bind(tag,"<Enter>",lambda e,current=item:self.chart_details(current,metric,details,total))
+                    rated=[float(self.data.get(str(path.resolve()),{}).get("rating") or 0) for path in vids()]
+                    rated=[value for value in rated if 1<=value<=5]
+                    if rated:
+                        average=sum(rated)/len(rated); x=left+(average-0.5)*spacing+bar_width/2
+                        canvas.create_line(x,80,x,bottom,fill="#111111",width=3); canvas.create_text(x,60,text=f"Avg {average:.1f}",fill="#111111",font=("Segoe UI",10,"bold"))
+                else:
+                    maximum=max(item["value"] for item in items) or 1; left=130; width=620; bar_height=max(18,min(36,360//len(items))); offset=max(40,(420-len(items)*bar_height)//2)
+                    for index,item in enumerate(items):
+                        y=offset+index*bar_height; bar_width=item["value"]/maximum*width; tag=f"chart{index}"; canvas.create_text(left-8,y+bar_height/2,text=item["label"],anchor="e"); canvas.create_rectangle(left,y,left+bar_width,y+bar_height-4,fill=colors[index%len(colors)],outline="",tags=("chart",tag)); canvas.tag_bind(tag,"<Enter>",lambda e,current=item:self.chart_details(current,metric,details,sum(i["value"] for i in items)))
+        chart_type.trace_add("write",render); canvas.bind("<Configure>",render); render()
+
+    def chart_details(self,item,metric,details,total):
+        share=item["value"]/total*100 if total else 0
+        if metric=="rating":text=f"{item['name']}: {int(item['value'])} lecture(s)"
+        elif metric in ("study","spent"):
+            text=f"{item['name']} | Date: {item.get('date','')} | Session time: {fmt(item['value'])} | Video playing time: {fmt(item.get('video',0))} | Share: {share:.1f}%"
+        elif metric=="overall":text=f"Filename: {item['name']} | Overall covered: {item['value']:.1f}% | Size: {self.size_text(item['size'])}"
+        else:text=f"Filename: {item['name']} | {metric.title()}: {fmt(item['value'])} | Share: {share:.1f}% | Size: {self.size_text(item['size'])}"
+        details.set(text)
+
+    def size_text(self,size):
+        units=("B","KB","MB","GB","TB"); value=float(size)
+        for unit in units:
+            if value<1024 or unit==units[-1]:return f"{value:.1f} {unit}" if unit!="B" else f"{int(value)} B"
+            value/=1024
 
     def draw(self):
         self.tree.delete(*self.tree.get_children()); total=covered=0; ratings=[]
@@ -403,6 +502,7 @@ class App:
         if column=="#2": os.startfile(iid)
         elif column=="#7": self.edit_rating(p,e)
         elif column=="#8": self.edit_review(p,e)
+        elif column=="#9": self.open_chart("spent")
 
     def selected(self):
         s=self.tree.selection()
@@ -633,7 +733,7 @@ class App:
         def save_rating(event=None):
             try:value=float(rating.get().strip() or 0)
             except ValueError:value=-1
-            if value and not 1<=value<=5:
+            if value and (not 1<=value<=5 or abs(value*2-round(value*2))>1e-9):
                 messagebox.showerror("Invalid rating","Choose a rating from 1 to 5, or 0 to clear it.",parent=self.root)
                 editor.focus_set(); return "break"
             record["rating"]=round(value,1); save(self.data); editor.destroy(); self.draw()
@@ -682,7 +782,7 @@ class App:
         if value is None:return
         try:
             rating=float(value.strip()) if value.strip() else 0
-            if rating!=0 and not 1<=rating<=5:raise ValueError
+            if rating!=0 and (not 1<=rating<=5 or abs(rating*2-round(rating*2))>1e-9):raise ValueError
         except ValueError:
             messagebox.showerror("Invalid rating","Enter a number from 1 to 5, or 0 to clear the rating.")
             return
