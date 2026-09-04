@@ -423,17 +423,145 @@ class App:
             "activebackground": t["accent"], "activeforeground": t["accent_text"],
             "selectcolor": t["accent"], "relief": "solid", "bd": 1
         }
-        if hasattr(self, "settings_menu"):
-            self.settings_menu.configure(**menu_opts)
-        if hasattr(self, "other_session_menu"):
-            self.other_session_menu.configure(**menu_opts)
+        for m in (getattr(self, "menubar", None),
+                  getattr(self, "file_menu", None),
+                  getattr(self, "edit_menu", None),
+                  getattr(self, "view_menu", None),
+                  getattr(self, "charts_menu", None),
+                  getattr(self, "player_menu", None),
+                  getattr(self, "settings_menu", None),
+                  getattr(self, "help_menu", None),
+                  getattr(self, "other_session_menu", None)):
+            if m:
+                try: m.configure(**menu_opts)
+                except Exception: pass
 
     def toggle_theme(self):
         new_theme = "light" if self.current_theme == "amoled" else "amoled"
         self.apply_theme(new_theme)
         save_app_theme(new_theme)
 
+    def toggle_activity_panel(self):
+        if self.activity_frame.winfo_ismapped():
+            self.hide_activity()
+        else:
+            self.show_activity()
+
+    def on_player_mode_menu(self):
+        global PLAYER_MODE
+        mode = self.player_mode_var.get()
+        PLAYER_MODE = mode
+        s = self.data.setdefault("_settings", {})
+        s["player_mode"] = mode
+        save(self.data)
+        self.draw()
+
+    def open_about(self):
+        messagebox.showinfo(
+            "About GitVLMPC",
+            "GitVLMPC - Lecture Progress Tracker\n"
+            "Version 2.1.0\n\n"
+            "Real-time lecture tracking with dual MPC-BE & VLC support,\n"
+            "study stopwatch, analytics charts, and AMOLED/Light aesthetics.\n\n"
+            "Keyboard Shortcuts:\n"
+            "• Ctrl+O: Change lecture folder\n"
+            "• Ctrl+T: Toggle Theme (Light ⇄ AMOLED)\n"
+            "• F5: Refresh videos & durations\n"
+            "• Ctrl+A: Select all lectures\n"
+            "• Esc: Unselect all\n"
+            "• Ctrl+Q: Exit application\n"
+            "• Double-click row: Open lecture video\n"
+            "• Double-click metric chip: Open analytics chart\n"
+            "• Right-click row: Fast actions menu"
+        )
+
     def build(self):
+        # Top-level Application Menu Bar (File, Edit, View, Player, Settings, Help)
+        self.menubar = tk.Menu(self.root)
+        self.root.config(menu=self.menubar)
+
+        # 1. File Menu
+        self.file_menu = tk.Menu(self.menubar, tearoff=0)
+        self.file_menu.add_command(label="📁 Change Folder...", accelerator="Ctrl+O", command=self.change_folder)
+        self.file_menu.add_command(label="📂 Open in File Explorer", command=lambda: os.startfile(str(VIDEO_DIR)) if VIDEO_DIR else None)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="📤 Export Progress JSON...", command=self.export_progress)
+        self.file_menu.add_command(label="📥 Import Progress JSON...", command=self.import_progress)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="❌ Exit", accelerator="Ctrl+Q", command=self.close)
+        self.menubar.add_cascade(label="File", menu=self.file_menu)
+
+        # 2. Edit Menu
+        self.edit_menu = tk.Menu(self.menubar, tearoff=0)
+        self.edit_menu.add_command(label="☑ Select All", accelerator="Ctrl+A", command=self.select_all)
+        self.edit_menu.add_command(label="☐ Unselect All", accelerator="Esc", command=self.unselect_all)
+        self.edit_menu.add_separator()
+        self.edit_menu.add_command(label="✓ Mark Selected as Watched", command=lambda: self.context_watched(self.selected(), True))
+        self.edit_menu.add_command(label="○ Mark Selected as Not Watched", command=lambda: self.context_watched(self.selected(), False))
+        self.edit_menu.add_command(label="⏱ Set Covered Time...", command=lambda: self.context_settime(self.selected()))
+        self.edit_menu.add_command(label="📍 Set to Current Player Position", command=lambda: self.context_set_current(self.selected()))
+        self.edit_menu.add_command(label="⭐ Edit Rating & Review...", command=lambda: self.context_rating_review(self.selected()))
+        self.edit_menu.add_separator()
+        self.edit_menu.add_command(label="🗑 Remove Selected", command=lambda: self.remove_selected() if self.select_mode else self.context_remove(self.selected()))
+        self.edit_menu.add_command(label="♻ Restore Removed Lectures...", command=self.restore_removed)
+        self.menubar.add_cascade(label="Edit", menu=self.edit_menu)
+
+        # 3. View Menu
+        self.view_menu = tk.Menu(self.menubar, tearoff=0)
+        self.view_menu.add_command(label="🔄 Refresh", accelerator="F5", command=self.refresh)
+        self.view_menu.add_separator()
+        self.view_menu.add_command(label="📋 Toggle Session Activity Panel", command=self.toggle_activity_panel)
+        self.view_menu.add_command(label="🕒 Session History Window...", command=self.show_sessions)
+        self.view_menu.add_separator()
+        self.charts_menu = tk.Menu(self.view_menu, tearoff=0)
+        self.charts_menu.add_command(label="📈 Overall Progress Chart", command=lambda: self.open_chart("overall"))
+        self.charts_menu.add_command(label="⏱ Covered Time Chart", command=lambda: self.open_chart("covered"))
+        self.charts_menu.add_command(label="⏳ Remaining Time Chart", command=lambda: self.open_chart("remaining"))
+        self.charts_menu.add_command(label="⭐ Rating Distribution Chart", command=lambda: self.open_chart("rating"))
+        self.charts_menu.add_command(label="🕒 Time Spent by Session Chart", command=lambda: self.open_chart("spent"))
+        self.view_menu.add_cascade(label="📊 Analytics & Charts", menu=self.charts_menu)
+        self.menubar.add_cascade(label="View", menu=self.view_menu)
+
+        # 4. Player Menu
+        self.player_menu = tk.Menu(self.menubar, tearoff=0)
+        self.player_menu.add_command(label="🔌 Test Player Connection", command=self.test_player)
+        self.player_menu.add_command(label="📜 Import MPC-BE History...", command=self.import_history)
+        self.player_menu.add_separator()
+        self.player_mode_var = tk.StringVar(value=PLAYER_MODE)
+        self.player_menu.add_radiobutton(label="Auto-detect (MPC-BE & VLC)", variable=self.player_mode_var, value="auto", command=self.on_player_mode_menu)
+        self.player_menu.add_radiobutton(label="MPC-BE Only", variable=self.player_mode_var, value="mpc", command=self.on_player_mode_menu)
+        self.player_menu.add_radiobutton(label="VLC Only", variable=self.player_mode_var, value="vlc", command=self.on_player_mode_menu)
+        self.player_menu.add_separator()
+        self.player_menu.add_command(label="⚙ Player Preferences & Ports...", command=lambda: self.open_settings("pref"))
+        self.menubar.add_cascade(label="Player", menu=self.player_menu)
+
+        # 5. Settings Menu
+        self.settings_menu = tk.Menu(self.menubar, tearoff=0)
+        self.settings_menu.add_command(label="⚙ Preferences (Player Modes & Ports)...", command=lambda: self.open_settings("pref"))
+        self.settings_menu.add_command(label="🎨 Theme Settings (Light / AMOLED)...", command=lambda: self.open_settings("theme"))
+        self.settings_menu.add_separator()
+        self.settings_menu.add_command(label="🌓 Toggle Theme (Light ⇄ AMOLED)", accelerator="Ctrl+T", command=self.toggle_theme)
+        self.menubar.add_cascade(label="Settings", menu=self.settings_menu)
+
+        # 6. Help Menu
+        self.help_menu = tk.Menu(self.menubar, tearoff=0)
+        self.help_menu.add_command(label="📖 Player Setup Guide (MPC-BE & VLC)...", command=self.open_help_guide)
+        self.help_menu.add_separator()
+        self.help_menu.add_command(label="ℹ About GitVLMPC...", command=self.open_about)
+        self.menubar.add_cascade(label="Help", menu=self.help_menu)
+
+        # Bind keyboard shortcuts
+        self.root.bind_all("<Control-o>", lambda e: self.change_folder())
+        self.root.bind_all("<Control-O>", lambda e: self.change_folder())
+        self.root.bind_all("<Control-t>", lambda e: self.toggle_theme())
+        self.root.bind_all("<Control-T>", lambda e: self.toggle_theme())
+        self.root.bind_all("<F5>", lambda e: self.refresh())
+        self.root.bind_all("<Control-q>", lambda e: self.close())
+        self.root.bind_all("<Control-Q>", lambda e: self.close())
+        self.root.bind_all("<Control-a>", lambda e: self.select_all())
+        self.root.bind_all("<Control-A>", lambda e: self.select_all())
+        self.root.bind_all("<Escape>", lambda e: self.unselect_all())
+
         # Full-window vertical scrollbar & container canvas
         self.main_canvas = tk.Canvas(self.root, highlightthickness=0)
         self.window_scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=self.main_canvas.yview)
@@ -479,21 +607,13 @@ class App:
 
         # Top Action / Tab Bar with Settings Dropdown
         top_bar=ttk.Frame(f); top_bar.pack(fill="x",pady=(2,6))
-        self.settings_btn=ttk.Menubutton(top_bar,text="Settings ▾")
-        self.settings_menu=tk.Menu(self.settings_btn,tearoff=0)
-        self.settings_btn.configure(menu=self.settings_menu)
-        self.settings_menu.add_command(label="⚙ Preferences (Player Modes & Ports)...", command=lambda: self.open_settings("pref"))
-        self.settings_menu.add_command(label="🎨 Theme Settings (Light / AMOLED)...", command=lambda: self.open_settings("theme"))
-        self.settings_menu.add_separator()
-        self.settings_menu.add_command(label="🌓 Toggle Theme (Light ⇄ AMOLED)", command=self.toggle_theme)
-        self.settings_btn.pack(side="left",padx=(0,6))
-
-        ttk.Button(top_bar,text="Player Guide",command=self.open_help_guide).pack(side="left",padx=(0,6))
-        ttk.Button(top_bar,text="Test Player",command=self.test_player).pack(side="left",padx=(0,6))
-        ttk.Button(top_bar,text="Open Folder",command=lambda:os.startfile(str(VIDEO_DIR))).pack(side="left",padx=(0,6))
-        ttk.Button(top_bar,text="Restore Removed",command=self.restore_removed).pack(side="left",padx=(0,6))
-        ttk.Button(top_bar,text="Import MPC-BE History",command=self.import_history).pack(side="left",padx=(0,6))
-        ttk.Button(top_bar,text="Refresh",command=self.refresh).pack(side="left",padx=(0,6))
+        ttk.Button(top_bar,text="📁 Change Folder",command=self.change_folder).pack(side="left",padx=(0,6))
+        ttk.Button(top_bar,text="🔄 Refresh",command=self.refresh).pack(side="left",padx=(0,6))
+        ttk.Button(top_bar,text="🔌 Test Player",command=self.test_player).pack(side="left",padx=(0,6))
+        ttk.Button(top_bar,text="📖 Setup Guide",command=self.open_help_guide).pack(side="left",padx=(0,6))
+        ttk.Button(top_bar,text="📂 Open Folder",command=lambda:os.startfile(str(VIDEO_DIR)) if VIDEO_DIR else None).pack(side="left",padx=(0,6))
+        ttk.Button(top_bar,text="♻ Restore Removed",command=self.restore_removed).pack(side="left",padx=(0,6))
+        ttk.Button(top_bar,text="⚙ Settings ▾",command=lambda:self.open_settings("pref")).pack(side="left",padx=(0,6))
 
         # Search row
         search=ttk.Frame(f); search.pack(fill="x",pady=(4,8))
