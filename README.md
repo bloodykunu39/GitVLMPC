@@ -2,14 +2,22 @@
 
 A desktop app that tracks lecture video progress, study sessions, ratings, and analytics in real time while using **MPC-BE** or **VLC Media Player**.
 
+---
+
 ## Requirements
 
-- Windows
-- Python 3.9 or newer
-- **MPC-BE** (with Web Interface enabled on port `13579`) and/or **VLC Media Player** (with Lua HTTP Web interface enabled on port `8080`)
-- (Optional) FFmpeg installed with `ffprobe.exe` in `PATH` for instant file scanning. If FFmpeg is not installed, video durations are automatically captured when playing in MPC-BE or VLC.
+- **Operating System:** Windows
+- **Python:** Python 3.9 or newer
+- **Media Players:**
+  - **MPC-BE** (with Web Interface enabled on port `13579`) and/or
+  - **VLC Media Player** (with Lua HTTP Web interface enabled on port `8080`)
+- **(Optional) FFmpeg:** Installed with `ffprobe.exe` in `PATH` for instant file scanning. If FFmpeg is not installed, video durations are automatically captured when playing in MPC-BE or VLC.
+- **(Optional) Focus Sound Libraries:**
+  - `sounddevice` and `numpy`: For pure sinusoidal binaural beats (e.g. `pip install sounddevice numpy`).
+  - `pygame`: For custom MP3 audio playback (e.g. `pip install pygame`).
+  - *Note: GitVLMPC core runs entirely with standard Python libraries. Audio packages are only needed if you wish to use binaural beats or MP3 reminder chimes.*
 
-Python packages are not required. The app uses only the Python standard library.
+---
 
 ## Media Player Setup Guides
 
@@ -93,6 +101,48 @@ The resulting single-file executable is created in `dist/GitVLMPC.exe`. It can b
 - **Settings Menu**: Unified top bar dropdown for **Preferences** (Player Modes & Ports), **Theme Settings**, and quick theme toggling.
 - **Interactive Player Guide**: Built-in tabbed guide with step-by-step instructions and connection test buttons.
 
+### Study Stopwatch & Live Reminder System
+- **Digital Study Stopwatch**: High-contrast stopwatch with Start, Pause, and End controls.
+- **Compact Lecture Badge**: Intelligently truncates long lecture filenames to save space (e.g. `First...End.mp4`) while displaying the full lecture title in a smooth hover tooltip.
+- **Live Reminder Countdown Badge**: Displays remaining time until next study reminder chime (`[ 00:44:32 ]`).
+- **Hover Information Tooltip**: Hovering over the countdown displays a near-mouse tooltip showing master status, live remaining time, sound engine details, volume, and quick interaction tips:
+  ```
+  Single-click to add time • Double-click to edit timer
+  Right-click for timer options
+  ```
+- **Right-Click Timer Context Menu**: Right-clicking the timer label provides complete timer management:
+  - Quick Add Time panel
+  - Direct Edit Timer scroller
+  - Cascading Presets sub-menu (+45m, +15m, etc.)
+  - Restart Countdown from start
+  - Reset to default interval (45m)
+  - Toggle Reminder On/Off
+  - Sound Settings shortcut
+  - Test Play / Pause controls
+- **Inline Quick-Add Panel (Right-Side Placement)**:
+  - Single-clicking the live countdown opens a sleek floating panel placed directly on the **right side** of the label (no `tk.Toplevel` popup windows).
+  - Automatically closes when clicking anywhere outside.
+- **5 Sub-Buttons Total (4 Presets + 1 Custom)**:
+  - **4 Preset Buttons** (Default: `+00:45:00`, `+00:15:00`, `+00:30:00`, `+00:05:00`): Left-clicking immediately adds/subtracts time relative to the live running countdown.
+  - **Preset Right-Click Context Menu**: Right-clicking any preset button opens an isolated menu:
+    - **Edit**: Inline HH:MM:SS scroller to edit duration and sign.
+    - **Change to Opposite Sign**: Flips `+` $\leftrightarrow$ `-` instantly.
+    - **Remove**: Deletes that preset button.
+    - **Add a Custom Box**: Adds/creates a custom preset.
+  - **1 Custom Button (`✎ Custom`)**: Switches inline to custom mode with a `+ Add to Countdown` / `- Subtract from Countdown` toggle and full scroller controls.
+- **Interactive Time Scroller (`HH : MM : SS`)**:
+  - Independent segment boxes for **HH** (`00`–`99`, clamped), **MM** (`00`–`59`, wrap), and **SS** (`00`–`59`, wrap).
+  - Mousewheel scrolling over any segment adjusts only that segment. Supports keyboard arrow keys and direct typing.
+- **Double-Click Direct Edit**:
+  - Double-clicking the countdown label directly opens an in-place HH:MM:SS editor to set the live countdown to any exact value.
+
+### Focus Sound Engine (Binaural Beats & MP3)
+- **Binaural Beat Generation**: Built-in tone generator creates pure sinusoidal waves with independent Left and Right channel frequencies (default: 200 Hz Left / 204 Hz Right for a 4 Hz theta focus beat) using `sounddevice` and `numpy`.
+- **Custom MP3 Audio Playback**: Supports playing custom audio files as study chimes via `pygame`.
+- **Collapsible Settings Panel (`⚙ Settings ▸`)**: Slides open inline below the stopwatch bar to configure sound modes, left/right frequencies, MP3 file browser, and master volume slider with live percentage feedback.
+- **Test Play / Pause Buttons**: Dedicated `▶ Play` and `⏸ Pause` buttons to test and preview focus audio indefinitely without starting a study session.
+- **Automatic Audio Cue**: Chimes automatically when the live countdown reaches zero during an active session, then resets for the next cycle.
+
 ### Progress & Analytics
 - Detects lecture durations with FFmpeg's `ffprobe`.
 - Reads playback position in real time from the active player.
@@ -102,8 +152,7 @@ The resulting single-file executable is created in `dist/GitVLMPC.exe`. It can b
 - Double-clicking a lecture's Time Spent cell opens a session-wise chart with session time, video-playing time, and percentage share on hover.
 - Rating bar chart plots lecture count against 1-5 ratings and marks the average rating with a line.
 
-### Study Stopwatch & Activity History
-- Provides a study stopwatch with a digital time display, Start, Pause, Resume, and Stop.
+### Study Sessions & Activity History
 - Timestamped sessions group multiple lectures and replay segments under IDs like `Session0001`.
 - Compact session activity panel shows session total, actual video-playing total, and a scrollable segment breakdown.
 - Filter activity by current session, historical session, or all sessions.

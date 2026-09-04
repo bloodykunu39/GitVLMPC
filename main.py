@@ -961,6 +961,12 @@ class App:
         self._countdown_click_job = None
         self._reminder_interval_entry.bind("<Button-1>", self._on_countdown_click)
         self._reminder_interval_entry.bind("<Double-Button-1>", self._on_countdown_double_click)
+        self._reminder_interval_entry.bind("<Button-3>", self._show_reminder_context_menu)
+        self._reminder_interval_entry.bind("<Button-2>", self._show_reminder_context_menu)
+        self._reminder_interval_entry.bind("<Enter>", self._reminder_tooltip_schedule)
+        self._reminder_interval_entry.bind("<Motion>", self._reminder_tooltip_schedule)
+        self._reminder_interval_entry.bind("<Leave>", self._reminder_tooltip_cancel)
+        self._reminder_interval_entry.bind("<ButtonPress>", lambda e: self._reminder_tooltip_cancel())
 
         # ⚙ Settings toggle button
         self._settings_open = False
@@ -1024,6 +1030,8 @@ class App:
         # Quick-add panel state
         self._quick_panel = None
         self._quick_dismiss_id = None
+        self._reminder_tip_id = None
+        self._reminder_tip_win = None
 
         # Initial visibility
         self._on_sound_mode_change()
@@ -1271,16 +1279,171 @@ class App:
         except (ValueError, TypeError):
             return default
 
+    # ── Hover Tooltip & Context Menu for Reminder Time ───────────────────────
+
+    def _reminder_tooltip_schedule(self, event):
+        """Schedule showing the reminder info tooltip near mouse cursor."""
+        self._reminder_tooltip_cancel()
+        if getattr(self, "_quick_panel", None):
+            return
+        x, y = event.x_root, event.y_root
+        self._reminder_tip_id = self._reminder_interval_entry.after(
+            350, lambda: self._reminder_tooltip_show(x, y)
+        )
+
+    def _reminder_tooltip_cancel(self, event=None):
+        """Cancel pending tooltip or destroy visible tooltip."""
+        if getattr(self, "_reminder_tip_id", None):
+            try:
+                self._reminder_interval_entry.after_cancel(self._reminder_tip_id)
+            except Exception:
+                pass
+            self._reminder_tip_id = None
+        if getattr(self, "_reminder_tip_win", None):
+            try:
+                self._reminder_tip_win.destroy()
+            except Exception:
+                pass
+            self._reminder_tip_win = None
+
+    def _reminder_tooltip_show(self, x, y):
+        """Display an informational tooltip near the cursor for Reminder Time."""
+        if getattr(self, "_quick_panel", None):
+            return
+        try:
+            tw = tk.Toplevel(self.root)
+            tw.overrideredirect(True)
+            tw.attributes("-topmost", True)
+            tw.geometry(f"+{x + 12}+{y + 12}")
+
+            frame = tk.Frame(tw, bg="#0d1117", relief="solid", bd=1,
+                             highlightbackground="#38bdf8", highlightthickness=1,
+                             padx=8, pady=6)
+            frame.pack()
+
+            # Status
+            is_enabled = self.reminder_enabled.get()
+            status_text = "Enabled" if is_enabled else "Disabled"
+            status_color = "#3fb950" if is_enabled else "#8b949e"
+
+            cur_live = self._get_current_live_seconds()
+            rh, rr = divmod(cur_live, 3600); rm, rs = divmod(rr, 60)
+            live_str = f"{rh:02d}:{rm:02d}:{rs:02d}"
+
+            # Sound info
+            mode = self.sound_mode.get()
+            if mode == "sine":
+                sound_info = f"Binaural Beat ({self.freq_l.get()}/{self.freq_r.get()} Hz)"
+            else:
+                p = self.mp3_path.get()
+                sound_info = f"MP3 ({Path(p).name})" if p else "MP3 (None selected)"
+            vol_pct = int(self.sound_vol.get() * 100)
+
+            # Top row: Reminder Time + status badge
+            top_row = tk.Frame(frame, bg="#0d1117")
+            top_row.pack(fill="x", pady=(0, 2))
+            tk.Label(top_row, text="🔔 Reminder Time", font=("Segoe UI", 9, "bold"),
+                     bg="#0d1117", fg="#f0f6fc").pack(side="left")
+            tk.Label(top_row, text=f"● {status_text}", font=("Segoe UI", 8, "bold"),
+                     bg="#0d1117", fg=status_color).pack(side="right", padx=(8, 0))
+
+            # Countdown info
+            in_session = bool(self.session and self.session.get("status") == "active")
+            lbl_mode = "Live Countdown:" if in_session else "Configured Interval:"
+            time_row = tk.Frame(frame, bg="#0d1117")
+            time_row.pack(anchor="w", pady=(1, 2))
+            tk.Label(time_row, text=lbl_mode, font=("Segoe UI", 8),
+                     bg="#0d1117", fg="#94a3b8").pack(side="left", padx=(0, 4))
+            tk.Label(time_row, text=live_str, font=("Consolas", 10, "bold"),
+                     bg="#0d1117", fg="#38bdf8").pack(side="left")
+
+            # Sound line
+            tk.Label(frame, text=f"Audio: {sound_info}  •  Vol: {vol_pct}%",
+                     font=("Segoe UI", 8), bg="#0d1117", fg="#8b949e").pack(anchor="w", pady=(0, 4))
+
+            # Separator
+            tk.Frame(frame, bg="#30363d", height=1).pack(fill="x", pady=(1, 4))
+
+            # Mandatory instructions specified by user:
+            tk.Label(frame, text="Single-click to add time • Double-click to edit timer",
+                     font=("Segoe UI", 8, "bold"), bg="#0d1117", fg="#58a6ff").pack(anchor="w")
+            tk.Label(frame, text="Right-click for timer options",
+                     font=("Segoe UI", 7), bg="#0d1117", fg="#6e7681").pack(anchor="w")
+
+            self._reminder_tip_win = tw
+        except Exception:
+            pass
+
+    def _show_reminder_context_menu(self, event):
+        """Right-click on reminder time: context menu for managing timer actions."""
+        self._reminder_tooltip_cancel()
+        if self._quick_panel:
+            self._close_quick_panel()
+
+        menu = tk.Menu(self.root, tearoff=0, bg="#161b22", fg="#e6edf3",
+                       activebackground="#1f6feb", activeforeground="#ffffff",
+                       relief="solid", bd=1)
+
+        menu.add_command(label="➕ Quick Add Time...", command=self._open_quick_add_panel)
+        menu.add_command(label="✏️ Direct Edit Timer...", command=self._open_direct_edit_panel)
+        menu.add_separator()
+
+        # Preset sub-menu or direct deltas
+        presets_menu = tk.Menu(menu, tearoff=0, bg="#161b22", fg="#e6edf3",
+                               activebackground="#1f6feb", activeforeground="#ffffff")
+        for p in getattr(self, "_timer_presets", []):
+            lbl_p = self._format_preset_label(p)
+            d = p["seconds"] if p.get("sign", "+") != "-" else -p["seconds"]
+            presets_menu.add_command(label=f"Add {lbl_p}",
+                                     command=lambda delta=d: self._apply_live_countdown_delta(delta))
+        menu.add_cascade(label="Presets", menu=presets_menu)
+
+        menu.add_command(label="🔄 Restart Countdown from Start", command=self._reset_live_countdown)
+        menu.add_command(label="⏱ Reset Interval to Default (45m)", command=lambda: self._set_live_countdown_direct(2700))
+        menu.add_separator()
+
+        is_on = self.reminder_enabled.get()
+        menu.add_command(
+            label="🔔 Turn Reminder Off" if is_on else "🔔 Turn Reminder On",
+            command=self._toggle_reminder_enabled
+        )
+        menu.add_command(label="⚙ Sound Settings...", command=self._toggle_settings)
+
+        if getattr(self, "_test_playing", False):
+            menu.add_command(label="⏸ Pause Test Sound", command=self._pause_test)
+        else:
+            menu.add_command(label="▶ Play Test Sound", command=self._play_test)
+
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _reset_live_countdown(self):
+        """Reset elapsed counter so countdown restarts from its full configured value."""
+        self._reminder_elapsed = 0
+        try:
+            total = max(1, int(self.reminder_interval.get()))
+        except (ValueError, TypeError):
+            total = 2700
+        rh, rr = divmod(total, 3600); rm, rs = divmod(rr, 60)
+        self._countdown_var.set(f"{rh:02d}:{rm:02d}:{rs:02d}")
+
+    def _toggle_reminder_enabled(self):
+        """Toggle reminder master switch and update UI state."""
+        self.reminder_enabled.set(not self.reminder_enabled.get())
+        self._on_reminder_toggle()
+        self.save_focus_sound_settings()
+
     # ── Inline Quick-Add Panel & Direct Edit (No Toplevel) ────────────────────
 
     def _on_countdown_click(self, event=None):
         """Single-click debouncer: wait briefly to distinguish from double-click."""
+        self._reminder_tooltip_cancel()
         if getattr(self, "_countdown_click_job", None) is not None:
             self.root.after_cancel(self._countdown_click_job)
         self._countdown_click_job = self.root.after(220, self._open_quick_add_panel)
 
     def _on_countdown_double_click(self, event=None):
         """Double-click handler: cancel single-click and open direct edit."""
+        self._reminder_tooltip_cancel()
         if getattr(self, "_countdown_click_job", None) is not None:
             self.root.after_cancel(self._countdown_click_job)
             self._countdown_click_job = None
