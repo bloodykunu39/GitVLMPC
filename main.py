@@ -1,15 +1,24 @@
-import json, math, os, re, shutil, subprocess, tkinter as tk, time
+import base64, json, math, os, re, shutil, subprocess, tkinter as tk, time
 from datetime import datetime
 from pathlib import Path
 from tkinter import ttk, messagebox, simpledialog, filedialog
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 from urllib.parse import unquote
 import winreg
 
 VIDEO_DIR = None
 DATA_FILE = None
 DEFAULT_MPC_PORT = 13579
+DEFAULT_VLC_PORT = 8080
+DEFAULT_PLAYER_MODE = "auto"
+DEFAULT_PRIORITY_PLAYER = "mpc"
+
 MPC_PORT = DEFAULT_MPC_PORT
+VLC_PORT = DEFAULT_VLC_PORT
+VLC_PASSWORD = ""
+PLAYER_MODE = DEFAULT_PLAYER_MODE
+PRIORITY_PLAYER = DEFAULT_PRIORITY_PLAYER
 EXTS = {".mp4",".mkv",".avi",".webm",".mov",".m4v",".ts",".m2ts",".flv",".wmv",".mpg",".mpeg"}
 
 def fmt(s):
@@ -40,16 +49,127 @@ def tag(html,id):
     m=re.search(rf'<[^>]*id=["\']{re.escape(id)}["\'][^>]*>(.*?)</',html,re.I|re.S)
     return re.sub("<[^>]+>","",m.group(1)).strip() if m else ""
 
-def mpc():
+def mpc(port=None):
+    port = port or MPC_PORT
     try:
-        with urlopen(f"http://127.0.0.1:{MPC_PORT}/variables.html",timeout=1) as r:
+        with urlopen(f"http://127.0.0.1:{port}/variables.html",timeout=1) as r:
             h=r.read().decode("utf-8","replace")
+        pos=float(tag(h,"position") or 0)/1000
+        dur=float(tag(h,"duration") or 0)/1000
+        state=tag(h,"statestring") or "Playing"
         return {"path":unquote(tag(h,"filepath")),
-                "pos":float(tag(h,"position") or 0)/1000,
-                "dur":float(tag(h,"duration") or 0)/1000,
-                "ps":tag(h,"positionstring"),"ds":tag(h,"durationstring"),
-                "state":tag(h,"statestring")}
+                "pos":pos,
+                "dur":dur,
+                "ps":tag(h,"positionstring") or fmt(pos),
+                "ds":tag(h,"durationstring") or fmt(dur),
+                "state":state,
+                "player":"MPC-BE"}
     except: return None
+
+def vlc(port=None, password=None):
+    port = port or VLC_PORT
+    password = password if password is not None else VLC_PASSWORD
+    try:
+        url = f"http://127.0.0.1:{port}/requests/status.json"
+        auth_bytes = f":{password}".encode("utf-8")
+        auth_header = "Basic " + base64.b64encode(auth_bytes).decode("ascii")
+        req = Request(url, headers={"Authorization": auth_header, "User-Agent": "LectureProgressTracker"})
+        with urlopen(req, timeout=1) as r:
+            raw = json.loads(r.read().decode("utf-8", "replace"))
+        meta = raw.get("information", {}).get("category", {}).get("meta", {})
+        uri = meta.get("uri") or meta.get("url") or meta.get("filename") or ""
+        if uri.startswith("file:///"):
+            path = unquote(uri[8:])
+            if len(path) > 2 and path[1] == ":":
+                path = path.replace("/", "\\")
+        else:
+            path = unquote(uri)
+        pos = float(raw.get("time") or 0)
+        dur = float(raw.get("length") or 0)
+        raw_state = str(raw.get("state") or "").lower()
+        state = "Playing" if raw_state == "playing" else "Paused" if raw_state == "paused" else "Stopped"
+        return {
+            "path": path,
+            "pos": pos,
+            "dur": dur,
+            "ps": fmt(pos),
+            "ds": fmt(dur),
+            "state": state,
+            "player": "VLC"
+        }
+    except: return None
+
+def poll_player():
+    if PLAYER_MODE == "mpc": return mpc()
+    if PLAYER_MODE == "vlc": return vlc()
+    m_info = mpc()
+    v_info = vlc()
+    if m_info and not v_info: return m_info
+    if v_info and not m_info: return v_info
+    if not m_info and not v_info: return None
+    m_play = str(m_info.get("state","")).lower() in {"playing","play","running"}
+    v_play = str(v_info.get("state","")).lower() in {"playing","play","running"}
+    if m_play and not v_play: return m_info
+    if v_play and not m_play: return v_info
+    def matches_lecture(info):
+        p = info.get("path") or ""
+        name = Path(p).name.lower()
+        return any(v.name.lower() == name for v in vids())
+    m_match = matches_lecture(m_info)
+    v_match = matches_lecture(v_info)
+    if m_match and not v_match: return m_info
+    if v_match and not m_match: return v_info
+    return m_info if PRIORITY_PLAYER == "mpc" else v_info
+
+def test_mpc_conn(port=None):
+    port = port or MPC_PORT
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/variables.html", timeout=1.5) as r:
+            h = r.read().decode("utf-8", "replace")
+        info = mpc(port)
+        playing_str = f"\nCurrently open: {Path(info['path']).name}" if (info and info.get("path")) else ""
+        return True, f"Connected to MPC-BE on port {port}!{playing_str}"
+    except Exception:
+        return False, (
+            f"Could not connect to MPC-BE on port {port}.\n\n"
+            "Checklist:\n"
+            "1. Is MPC-BE running?\n"
+            f"2. In MPC-BE: Options (press O) → Player → Web Interface → check 'Listen on port' ({port}).\n"
+            "3. Check 'Allow access from localhost only'.\n"
+            "4. Click OK in MPC-BE options."
+        )
+
+def test_vlc_conn(port=None, password=None):
+    port = port or VLC_PORT
+    password = password if password is not None else VLC_PASSWORD
+    try:
+        url = f"http://127.0.0.1:{port}/requests/status.json"
+        auth_bytes = f":{password}".encode("utf-8")
+        auth_header = "Basic " + base64.b64encode(auth_bytes).decode("ascii")
+        req = Request(url, headers={"Authorization": auth_header, "User-Agent": "LectureProgressTracker"})
+        with urlopen(req, timeout=1.5) as r:
+            raw = json.loads(r.read().decode("utf-8", "replace"))
+        meta = raw.get("information", {}).get("category", {}).get("meta", {})
+        title = meta.get("filename") or meta.get("title") or "No file currently loaded"
+        state = raw.get("state", "unknown")
+        return True, f"Connected to VLC on port {port}!\n\nStatus: {state}\nMedia: {title}"
+    except HTTPError as e:
+        if e.code == 401:
+            return False, (
+                f"VLC responded on port {port}, but Password Failed (401 Unauthorized).\n\n"
+                "Please verify the password in Player Settings matches your VLC setting:\n"
+                "In VLC: Tools → Preferences → Show settings: All → Interface → Main interfaces → Lua → Lua HTTP password."
+            )
+        return False, f"VLC HTTP Error: {e.code} {e.reason}"
+    except Exception:
+        return False, (
+            f"Could not connect to VLC on port {port}.\n\n"
+            "Checklist:\n"
+            "1. Is VLC running?\n"
+            "2. In VLC: Tools → Preferences → Show settings: All → Interface → Main interfaces → Check 'Web'.\n"
+            "3. Under Interface → Main interfaces → Lua → Enter a Password under 'Lua HTTP'.\n"
+            "4. IMPORTANT: Restart VLC after changing these settings!"
+        )
 
 def registry_history():
     """Best-effort import of MPC-HC/MPC-BE recent-file history.
@@ -83,10 +203,10 @@ def registry_history():
 
 class App:
     def __init__(self,root):
-        self.root=root; self.root.title("MPC-BE Lecture Progress"); self.root.geometry("1120x720")
+        self.root=root; self.root.title("StudyHard - Lecture Progress Tracker"); self.root.geometry("1120x720")
         self.folder_var=tk.StringVar(value=str(VIDEO_DIR))
         self.search_var=tk.StringVar()
-        self.data=load(); self.load_settings(); self.session=None; self.active_segment=None; self.current_info=None; self.auto_block_path=None; self.build(); self.refresh(); root.after(1000,self.loop)
+        self.data=load(); self.load_settings(); self.session=None; self.active_segment=None; self.current_info=None; self.auto_block_path=None; self.build(); self.refresh(); root.after(400,self.check_first_run); root.after(1000,self.loop)
         root.after(10000,self.auto_refresh)
         root.protocol("WM_DELETE_WINDOW",self.close)
 
@@ -109,19 +229,19 @@ class App:
             self.summary_labels.append(label)
         self.pb=ttk.Progressbar(f,maximum=100); self.pb.pack(fill="x")
         n=ttk.LabelFrame(self.root,text="Currently Playing",padding=10); n.pack(fill="x",padx=14,pady=10)
-        self.now=tk.StringVar(value="Waiting for MPC-BE...")
+        self.now=tk.StringVar(value="Waiting for media player...")
         self.nd=tk.StringVar()
         self.npb=ttk.Progressbar(n,maximum=100); ttk.Label(n,textvariable=self.now,font=("Segoe UI",11,"bold")).pack(anchor="w")
         self.npb.pack(fill="x",pady=5); ttk.Label(n,textvariable=self.nd).pack(anchor="w")
         timer=tk.LabelFrame(self.root,text="Study stopwatch",padx=10,pady=8); timer.pack(fill="x",padx=14,pady=(0,10))
-        self.timer_text=tk.StringVar(value="00:00:00"); self.timer_lecture=tk.StringVar(value="Waiting for MPC-BE activity")
+        self.timer_text=tk.StringVar(value="00:00:00"); self.timer_lecture=tk.StringVar(value="Waiting for media player activity")
         ttk.Label(timer,textvariable=self.timer_lecture,font=("Segoe UI",10,"bold")).pack(side="left")
         ttk.Label(timer,textvariable=self.timer_text,font=("Segoe UI",16,"bold")).pack(side="left",padx=18)
         self.start_session_button=ttk.Button(timer,text="Start Session",command=self.start_session); self.start_session_button.pack(side="left")
         self.pause_session_button=ttk.Button(timer,text="Pause Session",command=self.pause_session,state="disabled"); self.pause_session_button.pack(side="left",padx=6)
         self.stop_session_button=ttk.Button(timer,text="End Session",command=self.stop_session,state="disabled"); self.stop_session_button.pack(side="left")
         self.auto_start=tk.BooleanVar(value=self.auto_start_value)
-        ttk.Checkbutton(timer,text="Auto-start when MPC-BE is playing",variable=self.auto_start,command=self.save_auto_start).pack(side="left",padx=8)
+        ttk.Checkbutton(timer,text="Auto-start when player is playing",variable=self.auto_start,command=self.save_auto_start).pack(side="left",padx=8)
         ttk.Button(timer,text="Session History",command=self.show_sessions).pack(side="left",padx=6)
         self.activity_frame=ttk.LabelFrame(self.root,text="Session activity",padding=6)
         self.activity_frame.pack(fill="x",padx=14,pady=(0,10))
@@ -175,11 +295,12 @@ class App:
         toolbar_canvas.create_window((0,0),window=b,anchor="nw")
         b.bind("<Configure>",lambda e: toolbar_canvas.configure(scrollregion=toolbar_canvas.bbox("all")))
         ttk.Button(b,text="Refresh",command=self.refresh).pack(side="left")
-        ttk.Button(b,text="Import MPC-BE History",command=self.import_history).pack(side="left",padx=7)
+        ttk.Button(b,text="Player Settings",command=self.configure_player).pack(side="left",padx=7)
+        ttk.Button(b,text="Player Guide",command=self.open_help_guide).pack(side="left")
+        ttk.Button(b,text="Test Player",command=self.test_player).pack(side="left",padx=7)
         ttk.Button(b,text="Open Folder",command=lambda:os.startfile(str(VIDEO_DIR))).pack(side="left")
         ttk.Button(b,text="Restore Removed",command=self.restore_removed).pack(side="left",padx=7)
-        ttk.Button(b,text="MPC Settings",command=self.configure_mpc).pack(side="left",padx=7)
-        ttk.Button(b,text="Test MPC",command=self.test_mpc).pack(side="left")
+        ttk.Button(b,text="Import MPC-BE History",command=self.import_history).pack(side="left")
         ttk.Button(b,text="Export Progress",command=self.export_progress).pack(side="left",padx=7)
         ttk.Button(b,text="Import Progress",command=self.import_progress).pack(side="left")
         self.select_all_button=ttk.Button(b,text="Select all",command=self.select_all)
@@ -216,34 +337,265 @@ class App:
         self.folder_var.set(str(VIDEO_DIR)); self.data=load(); self.load_settings(); self.refresh()
 
     def load_settings(self):
-        global MPC_PORT
-        MPC_PORT=DEFAULT_MPC_PORT
+        global MPC_PORT, VLC_PORT, VLC_PASSWORD, PLAYER_MODE, PRIORITY_PLAYER
+        settings = self.data.get("_settings", {})
         try:
-            port=int(self.data.get("_settings",{}).get("mpc_port",DEFAULT_MPC_PORT))
-            if 1<=port<=65535:MPC_PORT=port
-        except (TypeError,ValueError): pass
-        self.auto_start_value=bool(self.data.get("_settings",{}).get("auto_start",True))
-
-    def configure_mpc(self):
-        global MPC_PORT
-        value=simpledialog.askstring("MPC-BE settings","MPC-BE web interface port:",initialvalue=str(MPC_PORT),parent=self.root)
-        if value is None:return
+            port = int(settings.get("mpc_port", DEFAULT_MPC_PORT))
+            if 1 <= port <= 65535: MPC_PORT = port
+        except (TypeError, ValueError): pass
         try:
-            port=int(value)
-            if not 1<=port<=65535:raise ValueError
-        except ValueError:
-            messagebox.showerror("Invalid port","Enter a port number from 1 to 65535.")
-            return
-        MPC_PORT=port
-        self.data.setdefault("_settings",{})["mpc_port"]=port
-        save(self.data); self.conn.set(f"MPC-BE port changed to {MPC_PORT}; testing..."); self.test_mpc()
+            port = int(settings.get("vlc_port", DEFAULT_VLC_PORT))
+            if 1 <= port <= 65535: VLC_PORT = port
+        except (TypeError, ValueError): pass
+        VLC_PASSWORD = str(settings.get("vlc_password", ""))
+        PLAYER_MODE = str(settings.get("player_mode", DEFAULT_PLAYER_MODE)).lower()
+        if PLAYER_MODE not in {"auto", "mpc", "vlc"}: PLAYER_MODE = DEFAULT_PLAYER_MODE
+        PRIORITY_PLAYER = str(settings.get("priority_player", DEFAULT_PRIORITY_PLAYER)).lower()
+        if PRIORITY_PLAYER not in {"mpc", "vlc"}: PRIORITY_PLAYER = DEFAULT_PRIORITY_PLAYER
+        self.auto_start_value = bool(settings.get("auto_start", True))
 
-    def test_mpc(self):
-        info=mpc()
-        if info:
-            messagebox.showinfo("MPC-BE connection",f"Connected to MPC-BE on port {MPC_PORT}.")
+    def save_player_settings(self, mode, priority, mpc_p, vlc_p, vlc_pass):
+        global MPC_PORT, VLC_PORT, VLC_PASSWORD, PLAYER_MODE, PRIORITY_PLAYER
+        MPC_PORT = mpc_p
+        VLC_PORT = vlc_p
+        VLC_PASSWORD = vlc_pass
+        PLAYER_MODE = mode
+        PRIORITY_PLAYER = priority
+        s = self.data.setdefault("_settings", {})
+        s["player_mode"] = mode
+        s["priority_player"] = priority
+        s["mpc_port"] = mpc_p
+        s["vlc_port"] = vlc_p
+        s["vlc_password"] = vlc_pass
+        save(self.data)
+        self.draw()
+
+    def check_first_run(self):
+        settings = self.data.get("_settings", {})
+        if "player_mode" not in settings:
+            self.first_run_dialog()
+
+    def first_run_dialog(self):
+        window = tk.Toplevel(self.root)
+        window.title("Welcome - Select Your Media Player")
+        window.geometry("580x440")
+        window.transient(self.root)
+        window.grab_set()
+
+        f = ttk.Frame(window, padding=16)
+        f.pack(fill="both", expand=True)
+
+        ttk.Label(f, text="Welcome to Lecture Progress Tracker!", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        ttk.Label(f, text="Which media player do you primarily use for watching your lectures?\nYou can change this or adjust ports anytime in Player Settings.", wraplength=540, foreground="#444").pack(anchor="w", pady=(6, 12))
+
+        mode_var = tk.StringVar(value=PLAYER_MODE)
+        priority_var = tk.StringVar(value=PRIORITY_PLAYER)
+
+        ttk.Radiobutton(f, text="Auto-detect (Recommended - works with both MPC-BE & VLC)", variable=mode_var, value="auto").pack(anchor="w", pady=3)
+        ttk.Radiobutton(f, text="MPC-BE only (port 13579)", variable=mode_var, value="mpc").pack(anchor="w", pady=3)
+        ttk.Radiobutton(f, text="VLC Media Player only (port 8080)", variable=mode_var, value="vlc").pack(anchor="w", pady=3)
+
+        p_frame = ttk.LabelFrame(f, text="When both players are open in Auto-detect, prioritize:", padding=8)
+        p_frame.pack(fill="x", pady=12)
+        ttk.Radiobutton(p_frame, text="Prioritize MPC-BE", variable=priority_var, value="mpc").pack(side="left", padx=(10, 20))
+        ttk.Radiobutton(p_frame, text="Prioritize VLC", variable=priority_var, value="vlc").pack(side="left")
+
+        guide_lbl = ttk.Label(f, text="Need help enabling the web interface in MPC-BE or VLC? Click to open Setup Guide.", foreground="#1a73e8", cursor="hand2")
+        guide_lbl.pack(anchor="w", pady=(8, 4))
+        guide_lbl.bind("<Button-1>", lambda e: self.open_help_guide())
+
+        def on_save():
+            self.save_player_settings(mode_var.get(), priority_var.get(), MPC_PORT, VLC_PORT, VLC_PASSWORD)
+            window.destroy()
+
+        b_row = ttk.Frame(f)
+        b_row.pack(fill="x", side="bottom", pady=(10, 0))
+        ttk.Button(b_row, text="📖 Open Setup Guide", command=self.open_help_guide).pack(side="left")
+        ttk.Button(b_row, text="Save Preference", command=on_save).pack(side="right")
+
+    def configure_player(self):
+        window = tk.Toplevel(self.root)
+        window.title("Media Player Settings")
+        window.geometry("640x560")
+        window.transient(self.root)
+        window.grab_set()
+
+        f = ttk.Frame(window, padding=16)
+        f.pack(fill="both", expand=True)
+
+        ttk.Label(f, text="Media Player Settings", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+
+        mode_var = tk.StringVar(value=PLAYER_MODE)
+        priority_var = tk.StringVar(value=PRIORITY_PLAYER)
+        mpc_port_var = tk.StringVar(value=str(MPC_PORT))
+        vlc_port_var = tk.StringVar(value=str(VLC_PORT))
+        vlc_pass_var = tk.StringVar(value=str(VLC_PASSWORD))
+
+        m_frame = ttk.LabelFrame(f, text="Detection Mode", padding=10)
+        m_frame.pack(fill="x", pady=(8, 8))
+        ttk.Radiobutton(m_frame, text="Auto-detect (Automatically tracks whichever player is active)", variable=mode_var, value="auto").pack(anchor="w")
+        ttk.Radiobutton(m_frame, text="MPC-BE only", variable=mode_var, value="mpc").pack(anchor="w", pady=2)
+        ttk.Radiobutton(m_frame, text="VLC Media Player only", variable=mode_var, value="vlc").pack(anchor="w")
+
+        p_frame = ttk.LabelFrame(f, text="Auto-detect Priority (if both players are open)", padding=10)
+        p_frame.pack(fill="x", pady=(0, 8))
+        ttk.Radiobutton(p_frame, text="Prioritize MPC-BE", variable=priority_var, value="mpc").pack(side="left", padx=(10, 20))
+        ttk.Radiobutton(p_frame, text="Prioritize VLC", variable=priority_var, value="vlc").pack(side="left")
+
+        mpc_box = ttk.LabelFrame(f, text="MPC-BE Configuration", padding=10)
+        mpc_box.pack(fill="x", pady=(0, 8))
+        ttk.Label(mpc_box, text="Web Port:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(mpc_box, textvariable=mpc_port_var, width=12).grid(row=0, column=1, padx=8, sticky="w")
+        def test_mpc_btn():
+            try: p = int(mpc_port_var.get())
+            except: messagebox.showerror("Invalid port", "Enter a valid port number.", parent=window); return
+            ok, msg = test_mpc_conn(p)
+            (messagebox.showinfo if ok else messagebox.showwarning)("MPC-BE Test", msg, parent=window)
+        ttk.Button(mpc_box, text="Test MPC-BE", command=test_mpc_btn).grid(row=0, column=2, padx=10)
+
+        vlc_box = ttk.LabelFrame(f, text="VLC Media Player Configuration", padding=10)
+        vlc_box.pack(fill="x", pady=(0, 8))
+        ttk.Label(vlc_box, text="Web Port:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(vlc_box, textvariable=vlc_port_var, width=12).grid(row=0, column=1, padx=8, sticky="w")
+        ttk.Label(vlc_box, text="Lua Password:").grid(row=1, column=0, sticky="w", pady=(6,0))
+        ttk.Entry(vlc_box, textvariable=vlc_pass_var, width=20, show="*").grid(row=1, column=1, padx=8, pady=(6,0), sticky="w")
+        def test_vlc_btn():
+            try: p = int(vlc_port_var.get())
+            except: messagebox.showerror("Invalid port", "Enter a valid port number.", parent=window); return
+            ok, msg = test_vlc_conn(p, vlc_pass_var.get())
+            (messagebox.showinfo if ok else messagebox.showwarning)("VLC Test", msg, parent=window)
+        ttk.Button(vlc_box, text="Test VLC", command=test_vlc_btn).grid(row=0, column=2, rowspan=2, padx=10)
+
+        b_row = ttk.Frame(f)
+        b_row.pack(fill="x", side="bottom", pady=(10, 0))
+        ttk.Button(b_row, text="📖 Setup Guide", command=self.open_help_guide).pack(side="left")
+
+        def save_and_close():
+            try:
+                mp = int(mpc_port_var.get())
+                vp = int(vlc_port_var.get())
+                if not (1 <= mp <= 65535 and 1 <= vp <= 65535): raise ValueError
+            except ValueError:
+                messagebox.showerror("Invalid port", "Ports must be numbers between 1 and 65535.", parent=window)
+                return
+            self.save_player_settings(mode_var.get(), priority_var.get(), mp, vp, vlc_pass_var.get())
+            window.destroy()
+
+        ttk.Button(b_row, text="Cancel", command=window.destroy).pack(side="right", padx=(6, 0))
+        ttk.Button(b_row, text="Save Settings", command=save_and_close).pack(side="right")
+
+    def test_player(self):
+        if PLAYER_MODE == "mpc":
+            ok, msg = test_mpc_conn()
+            (messagebox.showinfo if ok else messagebox.showwarning)("MPC-BE Connection", msg, parent=self.root)
+        elif PLAYER_MODE == "vlc":
+            ok, msg = test_vlc_conn()
+            (messagebox.showinfo if ok else messagebox.showwarning)("VLC Connection", msg, parent=self.root)
         else:
-            messagebox.showwarning("MPC-BE connection",f"Could not connect on port {MPC_PORT}. Check MPC-BE's web interface settings.")
+            m_ok, m_msg = test_mpc_conn()
+            v_ok, v_msg = test_vlc_conn()
+            status_text = (
+                f"Auto-detect Results (Priority: {PRIORITY_PLAYER.upper()}):\n\n"
+                f"• MPC-BE (port {MPC_PORT}): {'Connected ✓' if m_ok else 'Not reachable ✗'}\n"
+                f"• VLC (port {VLC_PORT}): {'Connected ✓' if v_ok else 'Not reachable ✗'}\n\n"
+                f"MPC-BE details:\n{m_msg}\n\n"
+                f"VLC details:\n{v_msg}"
+            )
+            (messagebox.showinfo if (m_ok or v_ok) else messagebox.showwarning)("Player Test Results", status_text, parent=self.root)
+
+    def open_help_guide(self, initial_tab=None):
+        window = tk.Toplevel(self.root)
+        window.title("Media Player Setup & Help Guide")
+        window.geometry("740x630")
+        window.transient(self.root)
+
+        notebook = ttk.Notebook(window)
+        notebook.pack(fill="both", expand=True, padx=12, pady=12)
+
+        mpc_tab = ttk.Frame(notebook, padding=16)
+        notebook.add(mpc_tab, text="  MPC-BE Setup  ")
+
+        ttk.Label(mpc_tab, text="How to Configure MPC-BE", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        mpc_instructions = (
+            "MPC-BE has a built-in web interface that allows the tracker to read playback position.\n\n"
+            "Step 1: Open MPC-BE.\n"
+            "Step 2: Press 'O' on your keyboard, or go to: View → Options.\n"
+            "Step 3: In the left sidebar, click on 'Player' → 'Web Interface'.\n"
+            f"Step 4: Check the box: [✓] Listen on port (default is {MPC_PORT}).\n"
+            "Step 5: Check the box: [✓] Allow access from localhost only (for security).\n"
+            "Step 6: Click 'Apply', then click 'OK'. Done!\n\n"
+            "Troubleshooting Tips:\n"
+            "• If the tracker shows 'Not connected', ensure MPC-BE is running with a video file open.\n"
+            "• Verify the port number matches the port configured in Player Settings."
+        )
+        ttk.Label(mpc_tab, text=mpc_instructions, justify="left", wraplength=680, font=("Segoe UI", 10)).pack(anchor="w", pady=(8, 16))
+
+        mpc_btn_row = ttk.Frame(mpc_tab)
+        mpc_btn_row.pack(fill="x")
+        def test_mpc_in_guide():
+            ok, msg = test_mpc_conn()
+            (messagebox.showinfo if ok else messagebox.showwarning)("MPC-BE Test", msg, parent=window)
+        ttk.Button(mpc_btn_row, text="Test MPC-BE Connection", command=test_mpc_in_guide).pack(side="left")
+
+        vlc_tab = ttk.Frame(notebook, padding=16)
+        notebook.add(vlc_tab, text="  VLC Media Player Setup  ")
+
+        ttk.Label(vlc_tab, text="How to Configure VLC Media Player", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        vlc_instructions = (
+            "VLC comes with an HTTP web interface that requires a one-time activation and password.\n\n"
+            "Step 1: Open VLC Media Player.\n"
+            "Step 2: Go to: Tools → Preferences (or press Ctrl + P).\n"
+            "Step 3: Under 'Show settings' at the bottom-left corner, select 'All'.\n"
+            "Step 4: In the left tree list, click: Interface → Main interfaces.\n"
+            "Step 5: In the right pane, check the box: [✓] Web (this enables Lua HTTP).\n"
+            "Step 6: In the left tree, expand 'Main interfaces' and click on 'Lua'.\n"
+            "Step 7: Under 'Lua HTTP', find the 'Password' field and type a password (e.g. 'vlc').\n"
+            f"Step 8: Notice the 'Lua HTTP port' (default is {VLC_PORT}).\n"
+            "Step 9: Click 'Save' at the bottom right.\n"
+            "Step 10: ⭐ CRITICAL: Close and RESTART VLC completely! ⭐\n"
+            "        (VLC's web server will not start until VLC is restarted)\n"
+            "Step 11: In this tracker's Player Settings, enter the same password you chose.\n\n"
+            "Troubleshooting Tips:\n"
+            "• 401 Unauthorized: The password entered in Tracker Settings does not match VLC's password.\n"
+            "• Connection refused: You must restart VLC after enabling the Web interface."
+        )
+        ttk.Label(vlc_tab, text=vlc_instructions, justify="left", wraplength=680, font=("Segoe UI", 10)).pack(anchor="w", pady=(8, 16))
+
+        vlc_btn_row = ttk.Frame(vlc_tab)
+        vlc_btn_row.pack(fill="x")
+        def test_vlc_in_guide():
+            ok, msg = test_vlc_conn()
+            (messagebox.showinfo if ok else messagebox.showwarning)("VLC Test", msg, parent=window)
+        ttk.Button(vlc_btn_row, text="Test VLC Connection", command=test_vlc_in_guide).pack(side="left")
+
+        dual_tab = ttk.Frame(notebook, padding=16)
+        notebook.add(dual_tab, text="  Using Both Players  ")
+
+        ttk.Label(dual_tab, text="Using Both MPC-BE and VLC", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        dual_instructions = (
+            "The tracker is designed to let you use MPC-BE, VLC, or both interchangeably!\n\n"
+            "• Seamless Progress Sync:\n"
+            "  All progress (furthest position, time spent, study sessions, ratings, notes) is stored in\n"
+            "  the video folder, so you can watch in MPC-BE today and continue in VLC tomorrow.\n\n"
+            "• Smart Auto-Detect:\n"
+            "  When set to 'Auto-detect', the tracker automatically follows whichever player is open.\n\n"
+            "• What happens if BOTH players are running at once?\n"
+            "  1. If only one player is actively playing, the tracker follows the playing one.\n"
+            "  2. If one player is playing a video from your lecture folder and the other is playing\n"
+            "     something else (like music or a film), the tracker tracks your lecture.\n"
+            "  3. If both are playing lectures from your folder, it prioritizes your chosen preference\n"
+            "     (Prioritize MPC-BE or Prioritize VLC in Player Settings)."
+        )
+        ttk.Label(dual_tab, text=dual_instructions, justify="left", wraplength=680, font=("Segoe UI", 10)).pack(anchor="w", pady=(8, 16))
+
+        close_row = ttk.Frame(window)
+        close_row.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(close_row, text="Close", command=window.destroy).pack(side="right")
+
+        if initial_tab == "vlc":
+            notebook.select(vlc_tab)
+        elif initial_tab == "both":
+            notebook.select(dual_tab)
 
     def short_name(self,name):
         return name if len(name)<=26 else name[:20]+"**"+name[-4:]
@@ -520,7 +872,7 @@ class App:
         m.add_command(label="✓ Mark all selected as watched" if bulk else "✓ Mark as watched",command=lambda: self.context_watched(p,True))
         m.add_command(label="○ Mark all selected as not watched" if bulk else "○ Mark as not watched",command=lambda: self.context_watched(p,False))
         m.add_command(label="Set covered time for all selected..." if bulk else "Set covered time...",command=lambda: self.context_settime(p))
-        m.add_command(label="Set all selected to current MPC-BE position" if bulk else "Set to current MPC-BE position",command=lambda: self.context_set_current(p))
+        m.add_command(label="Set all selected to current player position" if bulk else "Set to current player position",command=lambda: self.context_set_current(p))
         m.add_command(label="Set rating and review for all selected..." if bulk else "Set rating and review...",command=lambda: self.context_rating_review(p))
         m.add_separator()
         if self.select_mode and str(p.resolve()) in self.checked:
@@ -600,7 +952,7 @@ class App:
         save(self.data); self.draw()
 
     def context_set_current(self,p):
-        paths=self.context_paths(p); info=mpc()
+        paths=self.context_paths(p); info=self.current_info or poll_player()
         if not info:return
         for selected in paths:
             r=self.data[str(selected.resolve())]
@@ -631,7 +983,7 @@ class App:
         elif self.session:
             self.timer_lecture.set(f"{self.session['id']} • Waiting for recognized lecture")
         elif not self.session:
-            self.timer_lecture.set("Waiting for MPC-BE activity")
+            self.timer_lecture.set("Waiting for media player activity")
         self.start_session_button.configure(text="Resume Session" if self.session and self.session["status"]=="paused" else "Start Session")
         self.start_session_button.configure(state="disabled" if self.session and self.session["status"]=="active" else "normal")
         self.pause_session_button.configure(state="normal" if self.session and self.session["status"]=="active" else "disabled")
@@ -695,7 +1047,7 @@ class App:
             completed["segments"]=self.session.get("segments",[])
             self.data.setdefault("_study_sessions",[]).append(completed); save(self.data)
         if self.current_info:self.auto_block_path=self.current_info.get("path")
-        self.session=None; self.active_segment=None; self.timer_text.set("00:00:00"); self.timer_lecture.set("Waiting for MPC-BE activity"); self.update_session_display(); self.draw()
+        self.session=None; self.active_segment=None; self.timer_text.set("00:00:00"); self.timer_lecture.set("Waiting for media player activity"); self.update_session_display(); self.draw()
 
     def close(self):
         self.stop_session(save_session=True); self.root.destroy()
@@ -925,7 +1277,7 @@ class App:
         except: messagebox.showerror("Invalid time","Use MM:SS or H:MM:SS.")
 
     def set_current(self,p=None):
-        p=p or self.selected(); info=mpc()
+        p=p or self.selected(); info=self.current_info or poll_player()
         if not p or not info:return
         r=self.data[str(p.resolve())]; r["furthest"]=max(r.get("furthest",0),info["pos"])
         if info["dur"]:r["duration"]=info["dur"]
@@ -1000,10 +1352,13 @@ class App:
             "Use the right-click menu to mark the lectures you already completed.")
 
     def loop(self):
-        info=mpc(); self.current_info=info
+        info=poll_player(); self.current_info=info
         lecture=self.find_current_lecture(info)
         if info:
-            self.conn.set(f"MPC-BE connected • port {MPC_PORT}")
+            player_name=info.get("player","Player")
+            port=MPC_PORT if player_name=="MPC-BE" else VLC_PORT
+            mode_prefix=f"Auto-detect: {player_name}" if PLAYER_MODE=="auto" else player_name
+            self.conn.set(f"{mode_prefix} connected • port {port}")
             if lecture:
                 r=self.data[str(lecture.resolve())]
                 if info["dur"]:r["duration"]=info["dur"]
@@ -1012,11 +1367,17 @@ class App:
                 pct=f/d*100 if d else 0
                 session_watched=sum(float(s.get("duration") or 0) for s in self.data.get("_sessions",[]) if isinstance(s,dict) and str(s.get("lecture","")).lower()==lecture.name.lower())
                 if self.active_segment and self.active_segment["lecture"]==lecture.name:session_watched+=self.active_segment["video_elapsed"]
-                self.now.set(lecture.name); self.nd.set(f"{info['ps']} / {info['ds']} • Covered {fmt(f)} ({pct:.1f}%) • Session watched: {fmt(session_watched)} • {info['state']}"); self.npb["value"]=pct
+                self.now.set(lecture.name); self.nd.set(f"{info['ps']} / {info['ds']} • Covered {fmt(f)} ({pct:.1f}%) • Session watched: {fmt(session_watched)} • {info['state']} ({player_name})"); self.npb["value"]=pct
             else:
                 self.now.set("No recognized lecture currently playing"); self.nd.set(""); self.npb["value"]=0
         else:
-            self.conn.set(f"MPC-BE Web Interface not connected at port {MPC_PORT}"); self.now.set("No lecture currently playing"); self.nd.set(""); self.npb["value"]=0
+            if PLAYER_MODE=="auto":
+                self.conn.set(f"Waiting for media player (Auto-detect MPC-BE port {MPC_PORT} / VLC port {VLC_PORT})")
+            elif PLAYER_MODE=="mpc":
+                self.conn.set(f"MPC-BE Web Interface not connected at port {MPC_PORT}")
+            else:
+                self.conn.set(f"VLC Web Interface not connected at port {VLC_PORT}")
+            self.now.set("No lecture currently playing"); self.nd.set(""); self.npb["value"]=0
         if self.session and self.session["status"]=="active" and self.auto_start.get() and lecture and info and self.auto_block_path==info.get("path"):
             pass
         elif not self.session and self.auto_start.get() and self.is_playing(info) and lecture and self.auto_block_path!=info.get("path"):
