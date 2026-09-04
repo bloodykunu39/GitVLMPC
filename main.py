@@ -1,4 +1,4 @@
-import base64, json, math, os, re, shutil, subprocess, tkinter as tk, time
+import base64, json, math, os, re, shutil, socket, subprocess, threading, time, tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import ttk, messagebox, simpledialog, filedialog
@@ -137,9 +137,32 @@ def fmt(s):
 def big(s):
     s=max(0,int(s or 0)); h,r=divmod(s,3600); return f"{h}h {r//60:02d}m"
 
+_vids_cache = None
+
+def clear_vids_cache():
+    global _vids_cache
+    _vids_cache = None
+
 def vids():
-    return sorted([p for p in VIDEO_DIR.iterdir() if p.is_file() and p.suffix.lower() in EXTS],
-                  key=lambda x:x.name.lower()) if VIDEO_DIR.exists() else []
+    global _vids_cache
+    if _vids_cache is not None:
+        return _vids_cache
+    if not VIDEO_DIR or not VIDEO_DIR.exists():
+        _vids_cache = []
+        return []
+    try:
+        _vids_cache = sorted([p for p in VIDEO_DIR.iterdir() if p.is_file() and p.suffix.lower() in EXTS],
+                             key=lambda x: x.name.lower())
+    except Exception:
+        _vids_cache = []
+    return _vids_cache
+
+def is_port_open(port, timeout=0.08):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except Exception:
+        return False
 
 def load():
     try: return json.loads(DATA_FILE.read_text(encoding="utf-8"))
@@ -161,8 +184,10 @@ def tag(html,id):
 
 def mpc(port=None):
     port = port or MPC_PORT
+    if not is_port_open(port):
+        return None
     try:
-        with urlopen(f"http://127.0.0.1:{port}/variables.html",timeout=1) as r:
+        with urlopen(f"http://127.0.0.1:{port}/variables.html",timeout=0.8) as r:
             h=r.read().decode("utf-8","replace")
         pos=float(tag(h,"position") or 0)/1000
         dur=float(tag(h,"duration") or 0)/1000
@@ -178,13 +203,15 @@ def mpc(port=None):
 
 def vlc(port=None, password=None):
     port = port or VLC_PORT
+    if not is_port_open(port):
+        return None
     password = password if password is not None else VLC_PASSWORD
     try:
         url = f"http://127.0.0.1:{port}/requests/status.json"
         auth_bytes = f":{password}".encode("utf-8")
         auth_header = "Basic " + base64.b64encode(auth_bytes).decode("ascii")
         req = Request(url, headers={"Authorization": auth_header, "User-Agent": "LectureProgressTracker"})
-        with urlopen(req, timeout=1) as r:
+        with urlopen(req, timeout=0.8) as r:
             raw = json.loads(r.read().decode("utf-8", "replace"))
         meta = raw.get("information", {}).get("category", {}).get("meta", {})
         uri = meta.get("uri") or meta.get("url") or meta.get("filename") or ""
@@ -318,13 +345,26 @@ class App:
         self.search_var=tk.StringVar()
         self.current_theme = load_app_theme()
         self.data=load(); self.load_settings(); self.session=None; self.active_segment=None; self.current_info=None; self.auto_block_path=None
+        self._latest_player_info = None
+        self._poller_active = True
+        self._poller_thread = threading.Thread(target=self._bg_poll_loop, daemon=True)
+        self._poller_thread.start()
         self.build()
         self.apply_theme(self.current_theme)
         self.refresh()
         root.after(400,self.check_first_run)
-        root.after(1000,self.loop)
+        root.after(500,self.loop)
         root.after(10000,self.auto_refresh)
         root.protocol("WM_DELETE_WINDOW",self.close)
+
+    def _bg_poll_loop(self):
+        while getattr(self, "_poller_active", False):
+            try:
+                info = poll_player()
+                self._latest_player_info = info
+            except Exception:
+                self._latest_player_info = None
+            time.sleep(0.4)
 
     def apply_theme(self, theme_key):
         if theme_key not in THEMES:
@@ -732,6 +772,7 @@ class App:
         self.selected_count_label=ttk.Label(bottom_bar,textvariable=self.selected_count,foreground="#666")
 
     def refresh(self):
+        clear_vids_cache()
         for p in vids():
             k=str(p.resolve()); r=self.data.setdefault(k,{"name":p.name,"duration":0,"furthest":0,"manual":False,"rating":0,"review":""})
             r.setdefault("rating",0); r.setdefault("review","")
@@ -745,6 +786,7 @@ class App:
         return [p for p in vids() if not query or query in p.name.lower()]
 
     def auto_refresh(self):
+        clear_vids_cache()
         self.refresh()
         self.root.after(10000,self.auto_refresh)
 
@@ -754,6 +796,7 @@ class App:
         if not selected:return
         self.stop_session(save_session=True)
         self.exit_select_mode()
+        clear_vids_cache()
         VIDEO_DIR=Path(selected); DATA_FILE=VIDEO_DIR / ".lecture_progress.json"
         save_last_folder(str(VIDEO_DIR))
         self.folder_var.set(str(VIDEO_DIR)); self.data=load(); self.load_settings(); self.refresh()
@@ -1197,7 +1240,7 @@ class App:
             value/=1024
 
     def draw(self):
-        self.tree.delete(*self.tree.get_children()); total=covered=0; ratings=[]
+        total=covered=0; ratings=[]
         study_total=sum(float(s.get("session_duration",s.get("duration",0)) or 0) for s in self.data.get("_sessions",[]) if isinstance(s,dict))
         if self.session: study_total+=float(self.session.get("total") or 0)
         rows=[]
@@ -1222,12 +1265,29 @@ class App:
             rows.sort(key=lambda row: row[5].lower(), reverse=self.sort_reverse)
         else:
             rows.sort(key=lambda row: row[sort_index], reverse=self.sort_reverse)
-        for p,status,d,f,rating,review,spent in rows:
-            checkbox="☑" if str(p.resolve()) in self.checked else "☐"
-            if not self.select_mode: checkbox=""
-            rating_text=f"{rating:g}/5" if 1<=rating<=5 else "—"
-            tag="watched" if d and f>=d-2 else ("progress" if f>0 else "unwatched")
-            self.tree.insert("", "end", iid=str(p.resolve()), values=(checkbox,p.name,status,fmt(f),fmt(d) if d else "Unknown",f"{f/d*100:.1f}%" if d else "—",rating_text,review,fmt(spent)),tags=(tag,))
+
+        existing_iids = list(self.tree.get_children())
+        new_iids = [str(p.resolve()) for p, *_ in rows]
+        if existing_iids == new_iids:
+            for p, status, d, f, rating, review, spent in rows:
+                iid = str(p.resolve())
+                checkbox = "☑" if iid in self.checked else "☐"
+                if not self.select_mode: checkbox = ""
+                rating_text = f"{rating:g}/5" if 1 <= rating <= 5 else "—"
+                tag = "watched" if d and f >= d - 2 else ("progress" if f > 0 else "unwatched")
+                new_vals = (checkbox, p.name, status, fmt(f), fmt(d) if d else "Unknown", f"{f/d*100:.1f}%" if d else "—", rating_text, review, fmt(spent))
+                if tuple(self.tree.item(iid, "values")) != new_vals:
+                    self.tree.item(iid, values=new_vals, tags=(tag,))
+        else:
+            self.tree.delete(*existing_iids)
+            for p, status, d, f, rating, review, spent in rows:
+                iid = str(p.resolve())
+                checkbox = "☑" if iid in self.checked else "☐"
+                if not self.select_mode: checkbox = ""
+                rating_text = f"{rating:g}/5" if 1 <= rating <= 5 else "—"
+                tag = "watched" if d and f >= d - 2 else ("progress" if f > 0 else "unwatched")
+                self.tree.insert("", "end", iid=iid, values=(checkbox, p.name, status, fmt(f), fmt(d) if d else "Unknown", f"{f/d*100:.1f}%" if d else "—", rating_text, review, fmt(spent)), tags=(tag,))
+
         pct=covered/total*100 if total else 0
         self.vars[0].set("Total: "+big(total)); self.vars[1].set("Covered: "+big(covered))
         self.vars[2].set("Remaining: "+big(max(0,total-covered))); self.vars[3].set(f"Overall: {pct:.1f}%")
@@ -1238,7 +1298,8 @@ class App:
         self.draw_activity()
 
     def draw_activity(self):
-        self.activity_tree.delete(*self.activity_tree.get_children())
+        if hasattr(self, "activity_frame") and not self.activity_frame.winfo_ismapped():
+            return
         sessions=[]
         grouped_keys=set()
         for study_session in self.data.get("_study_sessions",[]):
@@ -1269,10 +1330,20 @@ class App:
         session_total=sum(float(s.get("session_duration",s.get("duration",0)) or 0) for s in sessions if isinstance(s,dict))
         video_total=sum(float(s.get("video_play_duration",s.get("duration",0)) or 0) for s in sessions if isinstance(s,dict))
         self.session_total_text.set("Session total: "+fmt(session_total)); self.video_total_text.set("Video playing total: "+fmt(video_total))
-        for segment in sessions:
-            if not isinstance(segment,dict):continue
-            started=str(segment.get("started_at", ""))
-            self.activity_tree.insert("","end",values=(segment.get("session_name",""),segment.get("lecture",""),started.replace("T"," "),fmt(segment.get("session_duration",segment.get("duration",0))),fmt(segment.get("video_play_duration",segment.get("duration",0)))))
+
+        existing_items = list(self.activity_tree.get_children())
+        valid_sessions = [s for s in sessions if isinstance(s, dict)]
+        if len(existing_items) == len(valid_sessions):
+            for iid, segment in zip(existing_items, valid_sessions):
+                started = str(segment.get("started_at", ""))
+                vals = (segment.get("session_name", ""), segment.get("lecture", ""), started.replace("T", " "), fmt(segment.get("session_duration", segment.get("duration", 0))), fmt(segment.get("video_play_duration", segment.get("duration", 0))))
+                if tuple(self.activity_tree.item(iid, "values")) != vals:
+                    self.activity_tree.item(iid, values=vals)
+        else:
+            self.activity_tree.delete(*existing_items)
+            for segment in valid_sessions:
+                started = str(segment.get("started_at", ""))
+                self.activity_tree.insert("", "end", values=(segment.get("session_name", ""), segment.get("lecture", ""), started.replace("T", " "), fmt(segment.get("session_duration", segment.get("duration", 0))), fmt(segment.get("video_play_duration", segment.get("duration", 0)))))
 
     def sort_activity(self,column):
         if self.activity_sort_column==column:
@@ -1466,7 +1537,7 @@ class App:
         save(self.data); self.draw()
 
     def context_set_current(self,p):
-        paths=self.context_paths(p); info=self.current_info or poll_player()
+        paths=self.context_paths(p); info=self.current_info or getattr(self, "_latest_player_info", None) or poll_player()
         if not info:return
         for selected in paths:
             r=self.data[str(selected.resolve())]
@@ -1564,7 +1635,12 @@ class App:
         self.session=None; self.active_segment=None; self.timer_text.set("00:00:00"); self.timer_lecture.set("Waiting for media player activity"); self.update_session_display(); self.draw()
 
     def close(self):
-        self.stop_session(save_session=True); self.root.destroy()
+        self._poller_active = False
+        self.stop_session(save_session=True)
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     def show_sessions(self):
         sessions=[s for s in self.data.get("_study_sessions",[]) if isinstance(s,dict)]
@@ -1791,7 +1867,7 @@ class App:
         except: messagebox.showerror("Invalid time","Use MM:SS or H:MM:SS.")
 
     def set_current(self,p=None):
-        p=p or self.selected(); info=self.current_info or poll_player()
+        p=p or self.selected(); info=self.current_info or getattr(self, "_latest_player_info", None) or poll_player()
         if not p or not info:return
         r=self.data[str(p.resolve())]; r["furthest"]=max(r.get("furthest",0),info["pos"])
         if info["dur"]:r["duration"]=info["dur"]
@@ -1866,44 +1942,67 @@ class App:
             "Use the right-click menu to mark the lectures you already completed.")
 
     def loop(self):
-        info=poll_player(); self.current_info=info
-        lecture=self.find_current_lecture(info)
+        info = getattr(self, "_latest_player_info", None)
+        self.current_info = info
+        lecture = self.find_current_lecture(info)
+        needs_redraw = False
         if info:
-            player_name=info.get("player","Player")
-            port=MPC_PORT if player_name=="MPC-BE" else VLC_PORT
-            mode_prefix=f"Auto-detect: {player_name}" if PLAYER_MODE=="auto" else player_name
+            player_name = info.get("player", "Player")
+            port = MPC_PORT if player_name == "MPC-BE" else VLC_PORT
+            mode_prefix = f"Auto-detect: {player_name}" if PLAYER_MODE == "auto" else player_name
             self.conn.set(f"{mode_prefix} connected • port {port}")
             if lecture:
-                r=self.data[str(lecture.resolve())]
-                if info["dur"]:r["duration"]=info["dur"]
-                if info["pos"]>float(r.get("furthest") or 0):r["furthest"]=info["pos"]; save(self.data)
-                d=float(r.get("duration") or info["dur"] or 0); f=min(r.get("furthest",0),d) if d else r.get("furthest",0)
-                pct=f/d*100 if d else 0
-                session_watched=sum(float(s.get("duration") or 0) for s in self.data.get("_sessions",[]) if isinstance(s,dict) and str(s.get("lecture","")).lower()==lecture.name.lower())
-                if self.active_segment and self.active_segment["lecture"]==lecture.name:session_watched+=self.active_segment["video_elapsed"]
-                self.now.set(lecture.name); self.nd.set(f"{info['ps']} / {info['ds']} • Covered {fmt(f)} ({pct:.1f}%) • Session watched: {fmt(session_watched)} • {info['state']} ({player_name})"); self.npb["value"]=pct
+                r = self.data[str(lecture.resolve())]
+                if info["dur"] and r.get("duration") != info["dur"]:
+                    r["duration"] = info["dur"]
+                    needs_redraw = True
+                if info["pos"] > float(r.get("furthest") or 0):
+                    r["furthest"] = info["pos"]
+                    save(self.data)
+                    needs_redraw = True
+                d = float(r.get("duration") or info["dur"] or 0)
+                f = min(r.get("furthest", 0), d) if d else r.get("furthest", 0)
+                pct = f / d * 100 if d else 0
+                session_watched = sum(float(s.get("duration") or 0) for s in self.data.get("_sessions", []) if isinstance(s, dict) and str(s.get("lecture", "")).lower() == lecture.name.lower())
+                if self.active_segment and self.active_segment["lecture"] == lecture.name:
+                    session_watched += self.active_segment["video_elapsed"]
+                self.now.set(lecture.name)
+                self.nd.set(f"{info['ps']} / {info['ds']} • Covered {fmt(f)} ({pct:.1f}%) • Session watched: {fmt(session_watched)} • {info['state']} ({player_name})")
+                self.npb["value"] = pct
             else:
-                self.now.set("No recognized lecture currently playing"); self.nd.set(""); self.npb["value"]=0
+                self.now.set("No recognized lecture currently playing")
+                self.nd.set("")
+                self.npb["value"] = 0
         else:
-            if PLAYER_MODE=="auto":
+            if PLAYER_MODE == "auto":
                 self.conn.set(f"Waiting for media player (Auto-detect MPC-BE port {MPC_PORT} / VLC port {VLC_PORT})")
-            elif PLAYER_MODE=="mpc":
+            elif PLAYER_MODE == "mpc":
                 self.conn.set(f"MPC-BE Web Interface not connected at port {MPC_PORT}")
             else:
                 self.conn.set(f"VLC Web Interface not connected at port {VLC_PORT}")
-            self.now.set("No lecture currently playing"); self.nd.set(""); self.npb["value"]=0
-        if self.session and self.session["status"]=="active" and self.auto_start.get() and lecture and info and self.auto_block_path==info.get("path"):
+            self.now.set("No lecture currently playing")
+            self.nd.set("")
+            self.npb["value"] = 0
+
+        if self.session and self.session["status"] == "active" and self.auto_start.get() and lecture and info and self.auto_block_path == info.get("path"):
             pass
-        elif not self.session and self.auto_start.get() and self.is_playing(info) and lecture and self.auto_block_path!=info.get("path"):
+        elif not self.session and self.auto_start.get() and self.is_playing(info) and lecture and self.auto_block_path != info.get("path"):
             self.start_session()
-        self.track_activity(info,lecture)
-        if lecture and self.session and self.session["status"]=="active":
+            needs_redraw = True
+
+        self.track_activity(info, lecture)
+        if lecture and self.session and self.session["status"] == "active":
             self.timer_lecture.set(lecture.name)
         elif not lecture and self.session:
             self.timer_lecture.set("Waiting for recognized lecture")
-        if self.session:self.update_session_display()
-        self.draw()
-        self.root.after(1000,self.loop)
+        if self.session:
+            self.update_session_display()
+            needs_redraw = True
+
+        if needs_redraw:
+            self.draw()
+
+        self.root.after(1000, self.loop)
 
 if __name__=="__main__":
     r=tk.Tk(); r.withdraw()
