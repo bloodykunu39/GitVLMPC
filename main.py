@@ -622,34 +622,53 @@ class App:
         self.content.bind("<Configure>", _update_scrollregion)
         self.main_canvas.bind("<Configure>", _resize_content)
 
+        try:
+            self.root.unbind_class("Treeview", "<MouseWheel>")
+            self.root.unbind_class("Treeview", "<Shift-MouseWheel>")
+        except Exception:
+            pass
+
         def _on_mousewheel(event):
             if not event.delta:
                 return
-            scroll_speed = 5
+            scroll_speed = 24
             pixels = int(-1 * (event.delta / 120) * scroll_speed) if abs(event.delta) >= 120 else int(-1 * event.delta * (scroll_speed / 120))
             if pixels == 0:
                 pixels = -scroll_speed if event.delta > 0 else scroll_speed
             direction = 1 if pixels > 0 else -1
 
-            target = self.root.winfo_containing(event.x_root, event.y_root)
+            target = getattr(event, "widget", None)
             tree_widget = None
             w = target
             while w:
-                w_str = str(w).lower()
-                if "treeview" in w_str:
+                if "treeview" in str(w).lower():
                     tree_widget = w
                     break
                 w = getattr(w, "master", None)
 
+            if not tree_widget:
+                w = self.root.winfo_containing(event.x_root, event.y_root)
+                while w:
+                    if "treeview" in str(w).lower():
+                        tree_widget = w
+                        break
+                    w = getattr(w, "master", None)
+
             if tree_widget:
                 try:
                     first, last = tree_widget.yview()
-                    if direction > 0 and last < 0.999:
-                        tree_widget.yview_scroll(1, "units")
+                    can_scroll_down = (direction > 0 and last < 0.999)
+                    can_scroll_up = (direction < 0 and first > 0.001)
+                    if can_scroll_down or can_scroll_up:
+                        self._tree_wheel_accum = getattr(self, "_tree_wheel_accum", 0) + event.delta
+                        # Require 120 delta (1 notch = 1 row)
+                        if abs(self._tree_wheel_accum) >= 120:
+                            row_step = 1 if self._tree_wheel_accum < 0 else -1
+                            self._tree_wheel_accum = 0
+                            tree_widget.yview_scroll(row_step, "units")
                         return "break"
-                    elif direction < 0 and first > 0.001:
-                        tree_widget.yview_scroll(-1, "units")
-                        return "break"
+                    else:
+                        self._tree_wheel_accum = 0
                 except Exception:
                     pass
 
@@ -658,8 +677,8 @@ class App:
 
         self._on_mousewheel = _on_mousewheel
         self.root.bind_all("<MouseWheel>", _on_mousewheel)
-        self.root.bind_all("<Button-4>", lambda e: self.main_canvas.yview_scroll(-5, "units"))
-        self.root.bind_all("<Button-5>", lambda e: self.main_canvas.yview_scroll(5, "units"))
+        self.root.bind_all("<Button-4>", lambda e: self.main_canvas.yview_scroll(-24, "units"))
+        self.root.bind_all("<Button-5>", lambda e: self.main_canvas.yview_scroll(24, "units"))
 
         f=ttk.Frame(self.content,padding=(14,12,14,6)); f.pack(fill="x")
         
