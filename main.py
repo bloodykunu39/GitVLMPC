@@ -603,7 +603,7 @@ class App:
         self.root.bind_all("<Escape>", lambda e: self.unselect_all())
 
         # Full-window vertical scrollbar & container canvas
-        self.main_canvas = tk.Canvas(self.root, highlightthickness=0)
+        self.main_canvas = tk.Canvas(self.root, highlightthickness=0, yscrollincrement=1)
         self.window_scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=self.main_canvas.yview)
         self.main_canvas.configure(yscrollcommand=self.window_scrollbar.set)
         
@@ -625,35 +625,15 @@ class App:
         def _on_mousewheel(event):
             if not event.delta:
                 return
-            count = int(-1 * (event.delta / 120))
-            step = count if count != 0 else (-1 if event.delta > 0 else 1)
-
-            target = self.root.winfo_containing(event.x_root, event.y_root)
-            tree_widget = None
-            w = target
-            while w:
-                w_str = str(w).lower()
-                if "treeview" in w_str:
-                    tree_widget = w
-                    break
-                w = getattr(w, "master", None)
-
-            if tree_widget:
-                try:
-                    first, last = tree_widget.yview()
-                    if step > 0 and last < 0.999:
-                        tree_widget.yview_scroll(step, "units")
-                        return "break"
-                    elif step < 0 and first > 0.001:
-                        tree_widget.yview_scroll(step, "units")
-                        return "break"
-                except Exception:
-                    pass
-
-            self.main_canvas.yview_scroll(step * 2, "units")
+            pixels = int(-1 * (event.delta / 120) * 56) if abs(event.delta) >= 120 else int(-1 * event.delta * (56 / 120))
+            if pixels == 0:
+                pixels = -56 if event.delta > 0 else 56
+            self.main_canvas.yview_scroll(pixels, "units")
             return "break"
 
-        self.main_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        self.root.bind_all("<MouseWheel>", _on_mousewheel)
+        self.root.bind_all("<Button-4>", lambda e: self.main_canvas.yview_scroll(-56, "units"))
+        self.root.bind_all("<Button-5>", lambda e: self.main_canvas.yview_scroll(56, "units"))
 
         f=ttk.Frame(self.content,padding=(14,12,14,6)); f.pack(fill="x")
         
@@ -1295,6 +1275,11 @@ class App:
         self.vars[5].set("Study time: "+big(study_total))
         self.pb["value"]=pct
         self.selected_count.set(f"{len(self.checked)} selected" if self.select_mode else "")
+
+        target_height = max(12, len(rows))
+        if self.tree.cget("height") != target_height:
+            self.tree.configure(height=target_height)
+
         self.draw_activity()
 
     def draw_activity(self):
@@ -1344,6 +1329,10 @@ class App:
             for segment in valid_sessions:
                 started = str(segment.get("started_at", ""))
                 self.activity_tree.insert("", "end", values=(segment.get("session_name", ""), segment.get("lecture", ""), started.replace("T", " "), fmt(segment.get("session_duration", segment.get("duration", 0))), fmt(segment.get("video_play_duration", segment.get("duration", 0)))))
+
+        target_act_height = max(4, min(10, len(valid_sessions)))
+        if self.activity_tree.cget("height") != target_act_height:
+            self.activity_tree.configure(height=target_act_height)
 
     def sort_activity(self,column):
         if self.activity_sort_column==column:
