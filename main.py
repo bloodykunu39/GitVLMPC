@@ -625,7 +625,7 @@ class App:
         def _on_mousewheel(event):
             if not event.delta:
                 return
-            scroll_speed = 24
+            scroll_speed = 10
             pixels = int(-1 * (event.delta / 120) * scroll_speed) if abs(event.delta) >= 120 else int(-1 * event.delta * (scroll_speed / 120))
             if pixels == 0:
                 pixels = -scroll_speed if event.delta > 0 else scroll_speed
@@ -656,9 +656,10 @@ class App:
             self.main_canvas.yview_scroll(pixels, "units")
             return "break"
 
+        self._on_mousewheel = _on_mousewheel
         self.root.bind_all("<MouseWheel>", _on_mousewheel)
-        self.root.bind_all("<Button-4>", lambda e: self.main_canvas.yview_scroll(-24, "units"))
-        self.root.bind_all("<Button-5>", lambda e: self.main_canvas.yview_scroll(24, "units"))
+        self.root.bind_all("<Button-4>", lambda e: self.main_canvas.yview_scroll(-10, "units"))
+        self.root.bind_all("<Button-5>", lambda e: self.main_canvas.yview_scroll(10, "units"))
 
         f=ttk.Frame(self.content,padding=(14,12,14,6)); f.pack(fill="x")
         
@@ -755,6 +756,7 @@ class App:
             self.activity_tree.heading(c,text=t,command=lambda column=c:self.sort_activity(column)); self.activity_tree.column(c,width=w,anchor="w" if c in ("lecture","started") else "center")
         activity_scroll=ttk.Scrollbar(activity_body,orient="vertical",command=self.activity_tree.yview)
         self.activity_tree.configure(yscrollcommand=activity_scroll.set); self.activity_tree.pack(side="left",fill="x",expand=True); activity_scroll.pack(side="right",fill="y")
+        self.activity_tree.bind("<MouseWheel>", self._on_mousewheel)
         self.show_activity_button=ttk.Button(self.content,text="Show Activity",command=self.show_activity)
         self.body_frame=ttk.Frame(self.content,padding=(14,0,14,10)); self.body_frame.pack(fill="both",expand=True)
         cols=("select","lecture","status","covered","duration","progress","rating","review","spent"); self.tree=ttk.Treeview(self.body_frame,columns=cols,show="headings",height=16)
@@ -768,6 +770,7 @@ class App:
         self.tree.bind("<Button-3>",self.menu)
         self.tree.bind("<Button-1>",self.tree_click)
         self.tree.bind("<Double-1>",self.open_lecture)
+        self.tree.bind("<MouseWheel>", self._on_mousewheel)
         # Bottom bar for multi-selection mode
         bottom_bar=ttk.Frame(self.content,padding=(14,4,14,8)); bottom_bar.pack(fill="x")
         self.select_all_button=ttk.Button(bottom_bar,text="Select all",command=self.select_all)
