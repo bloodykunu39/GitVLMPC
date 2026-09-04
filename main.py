@@ -625,7 +625,7 @@ class App:
         def _on_mousewheel(event):
             if not event.delta:
                 return
-            scroll_speed = 10
+            scroll_speed = 5
             pixels = int(-1 * (event.delta / 120) * scroll_speed) if abs(event.delta) >= 120 else int(-1 * event.delta * (scroll_speed / 120))
             if pixels == 0:
                 pixels = -scroll_speed if event.delta > 0 else scroll_speed
@@ -658,8 +658,8 @@ class App:
 
         self._on_mousewheel = _on_mousewheel
         self.root.bind_all("<MouseWheel>", _on_mousewheel)
-        self.root.bind_all("<Button-4>", lambda e: self.main_canvas.yview_scroll(-10, "units"))
-        self.root.bind_all("<Button-5>", lambda e: self.main_canvas.yview_scroll(10, "units"))
+        self.root.bind_all("<Button-4>", lambda e: self.main_canvas.yview_scroll(-5, "units"))
+        self.root.bind_all("<Button-5>", lambda e: self.main_canvas.yview_scroll(5, "units"))
 
         f=ttk.Frame(self.content,padding=(14,12,14,6)); f.pack(fill="x")
         
