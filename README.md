@@ -36,6 +36,15 @@ Ratings use a 1-5 scale. The average rating excludes lectures without a rating, 
 - Tracks the furthest position reached for each lecture.
 - Shows total, covered, remaining, and overall progress.
 - Stores a 1-5 rating and review for each lecture and shows the average rating.
+- Provides a user-controlled study stopwatch for the selected lecture with Start, Pause, Resume, and Stop.
+- Saves timestamped sessions, shows per-lecture Time Spent, total Study time, and a session history.
+- Groups multiple lectures and replay segments under one dated ID such as `Session0001` until the user ends the session.
+- Shows a compact activity area with session total, actual video-playing total, and a scrollable segment list.
+- Shows a scrollable activity table with separate session time and actual video-playing time for every segment.
+- Supports manually added segments and hiding/showing the activity panel without stopping tracking.
+- Detects the current lecture directly from MPC-BE, so starting a session never requires selecting a table row.
+- Counts session time only while the app session is active and MPC-BE reports playback; app controls never play, pause, stop, or seek MPC-BE.
+- Can automatically start tracking when MPC-BE is already playing a recognized lecture, with an option to disable auto-start.
 - Double-click a Rating cell to open the rating spinner; use its arrows or mouse wheel to adjust the value.
 - Double-click a Review cell to edit the review in a multiline text box and save it.
 - Colors identify watched, in-progress, and not-watched lecture rows.
@@ -43,6 +52,7 @@ Ratings use a 1-5 scale. The average rating excludes lectures without a rating, 
 - Refreshes the folder automatically every 10 seconds.
 - Opens a lecture in the Windows default video player when double-clicking its Lecture cell.
 - Exports and imports progress using portable JSON files.
+- Exports and imports saved study sessions with progress data.
 - Allows the MPC-BE web interface port to be changed and tested.
 - Sorts the lecture table by clicking any column heading; click again to reverse the order.
 - Enables checkbox selection from a lecture's right-click menu and supports selecting all visible lectures.
